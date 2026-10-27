@@ -24,8 +24,9 @@ class BufferedAdapter:
     unit, count_scale = 'uV', 1.
     settings = dict(fs=1000, channels=32, points=5)
 
-    def __init__(self, packet, status, resume=True, corrupt=False):
+    def __init__(self, packet, status, resume=True, corrupt=False, gap_points=0, wrong_id=False):
         self.packet, self.status, self.resume, self.corrupt = packet, status, resume, corrupt
+        self.gap_points, self.wrong_id = gap_points, wrong_id
         self.stop = threading.Event()
         self.disconnect_count = 0
 
@@ -37,6 +38,8 @@ class BufferedAdapter:
         deadline=time.monotonic()
         for start in range(0, 2000, 5):
             deadline += .005
+            if 100 <= start < 100+self.gap_points:
+                continue
             if self.corrupt and start == 100:
                 frame=bytearray(acp.build_frame(acp.TOKEN_CMD,17,acp.PKG_ALERT,
                     bytes([2,2,start//5])+struct.pack('<II',100000+start,100000+start),bytes(480),acp.TAIL_CMD))
@@ -44,12 +47,13 @@ class BufferedAdapter:
                 self.status('crc_error',dict(candidate_frame_hex=frame.hex(),payload_length=480))
                 continue
             if start == 200:
-                if not self.corrupt and self.stop.wait(1.3 if self.resume else 6):
+                if not self.corrupt and not self.gap_points and self.stop.wait(1.3 if self.resume else 6):
                     return
             if self.stop.is_set():
                 return
             self.packet(Packet('eeg', time.time_ns(), time.perf_counter_ns(),
-                100000+start, counts=np.zeros((32,5), np.int32), packet_id=(start//5)%256))
+                100000+start, counts=np.zeros((32,5), np.int32),
+                packet_id=(start//5+int(self.wrong_id and start == 100))%256))
             if self.stop.wait(max(0,deadline-time.monotonic())):
                 return
 
@@ -63,7 +67,7 @@ class BufferedAdapter:
 
 
 class StreamWaitTests(unittest.TestCase):
-    def run_stream(self, resume, corrupt=False):
+    def run_stream(self, resume, corrupt=False, gap_points=0, wrong_id=False):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         folder = Path(temporary.name)
@@ -79,7 +83,8 @@ class StreamWaitTests(unittest.TestCase):
             def recover_stream(self, first, reason):
                 resets.append(first)
         def adapter(*args):
-            item = BufferedAdapter(*args, resume=resume, corrupt=corrupt)
+            item = BufferedAdapter(*args, resume=resume, corrupt=corrupt,
+                                   gap_points=gap_points, wrong_id=wrong_id)
             adapters.append(item)
             return item
         cfg = dict(device=dict(host='127.0.0.1', port=12345, sample_rate=1000,
@@ -126,6 +131,43 @@ class StreamWaitTests(unittest.TestCase):
             self.assertTrue(h.attrs['contains_discontinuities'])
             self.assertFalse(np.any((indices>=100)&(indices<105)))
             self.assertEqual(int(np.max(np.diff(indices))),6)
+
+    def test_complete_missing_packets_resume_with_a_real_gap_and_fresh_model_batches(self):
+        folder, controller, calls, resets, adapter, error = self.run_stream(True, gap_points=10)
+        self.assertIsNone(error)
+        self.assertEqual(adapter.disconnect_count, 1)
+        self.assertEqual(resets[0], 110)
+        self.assertGreater(resets[-1], 110)
+        self.assertTrue(any(ix[0] >= resets[-1] for ix in calls))
+        for ix in calls:
+            np.testing.assert_array_equal(np.diff(ix), 1)
+            self.assertTrue(ix[-1] < 100 or ix[0] >= resets[-1])
+        self.assertFalse(controller.eeg_fault_active.is_set())
+        self.assertEqual(controller.state['gap_count'], 1)
+        with h5py.File(folder/'raw_acp.h5') as h:
+            indices = h['source_index'][:]
+            self.assertTrue(h.attrs['complete'])
+            self.assertTrue(h.attrs['contains_discontinuities'])
+            self.assertFalse(np.any((indices >= 100) & (indices < 110)))
+            self.assertEqual(int(np.max(np.diff(indices))), 11)
+            np.testing.assert_array_equal(h['device_ms'][:]-100000, indices)
+        events = [json.loads(s) for s in (folder/'protocol_events.jsonl').read_text(encoding='utf-8').splitlines()]
+        recovered = next(e['detail'] for e in events if e['kind'] == 'stream_recovery')
+        self.assertEqual(recovered['reason'], 'packet_gap')
+        self.assertEqual(recovered['missing_samples'], 10)
+        self.assertEqual(recovered['repaired_samples'], 0)
+        self.assertIn('stream_resumed', [e['kind'] for e in events])
+
+    def test_sequence_only_fault_still_stops_and_preserves_offending_frame(self):
+        folder, controller, calls, resets, adapter, error = self.run_stream(True, wrong_id=True)
+        self.assertIn('不一致', error)
+        self.assertEqual(resets, [])
+        self.assertTrue(controller.eeg_fault_active.is_set())
+        self.assertTrue(all(ix[-1] < 100 for ix in calls))
+        with h5py.File(folder/'raw_acp.h5') as h:
+            self.assertFalse(h.attrs['complete'])
+            self.assertEqual(h['source_index'][-1], 104)
+            self.assertEqual(h['packet_id'][-1], 21)
 
 
 class PromptStreamWaitTests(unittest.TestCase):
