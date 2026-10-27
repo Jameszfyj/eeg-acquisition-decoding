@@ -88,7 +88,7 @@ function at(radius,angle){const a=angle*Math.PI/180;return{x:300+Math.cos(a)*rad
 function angleFor(index){return workspaceKind==='four'?[-135,135,-45,45][index]:-90+index*360/Math.max(2,classes.length);}
 function sectorPath(angle){const half=workspaceKind==='four'?42:180/Math.max(2,classes.length)-3,a=at(238,angle-half),b=at(238,angle+half),c=at(111,angle+half),d=at(111,angle-half);return`M${a.x},${a.y} A238,238 0 0 1 ${b.x},${b.y} L${c.x},${c.y} A111,111 0 0 0 ${d.x},${d.y} Z`;}
 function taskName(c){return c.task_text||c.name;}
-function decodeLabel(c,action=c?.hand_action){return $('mode').value==='six'?(decodeActionNames[action]||taskName(c)):taskName(c);}
+function decodeLabel(c,action=c?.hand_action){return workspaceKind!=='four'?(decodeActionNames[action]||taskName(c)):taskName(c);}
 function shortName(value,max=10){return value.length>max?value.slice(0,max-1)+'…':value;}
 function savedHandMapping(){
   const key=profileKey()+':mapping';let saved={};
@@ -142,7 +142,7 @@ function buildDial(newClasses){
     $('sectors').append(group);
   }
   text('classCount',`${classes.length} CLASS${workspaceKind!=='four'&&classes.length<6?' / 6 SLOTS':''}`);
-  $('dial').setAttribute('aria-label',`${slots}类别概率、候选方向与稳定判决进度`);
+  $('dial').setAttribute('aria-label',workspaceKind==='four'?`${slots}类别概率、候选方向与稳定判决进度`:`${slots}种对应手势名称、实时概率与判决进度`);
   buildProfiles();
 
 }
