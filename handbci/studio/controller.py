@@ -69,6 +69,7 @@ class Controller:
         self.audio = {}
         self.subject_lease, self.subject_heartbeat = False, 0
         self.protocol = copy.deepcopy(DEFAULT_PROTOCOL)
+        self.validation_model, self.validation = None, None
         self.consumer = threading.Thread(target=self._consume, name='studio-packet-consumer', daemon=True)
         self.marker = threading.Thread(target=self._mark_loop, name='studio-marker', daemon=True)
         self.confirmer = threading.Thread(target=self._confirm_loop, name='studio-mark-confirmation', daemon=True)
@@ -257,7 +258,14 @@ class Controller:
         self.audio = {x['text']:x['url'] for x in audio['cues']}
         return audio
 
-    def start(self, participant, protocol, require_subject=False):
+    def import_validation(self, participant, data, filename, manifest=None):
+        with self.operation:
+            self.idle_required()
+            from .validation import import_validation_model
+            self.validation_model = import_validation_model(self.root, participant, data, filename, manifest)
+            return copy.deepcopy(self.validation_model)
+
+    def start(self, participant, protocol, require_subject=False, validation=False, validation_model_id=None):
         with self.operation:
             self.idle_required()
             p = validate_protocol(protocol)
@@ -272,6 +280,14 @@ class Controller:
             if p['sound'] and any(t not in self.audio for t in ['开始','休息','结束']+[x['text'] for x in p['tasks']]):
                 raise ValueError('请先准备并试听本机语音。')
             description = self.device.describe()
+            verifier = None
+            if validation:
+                if not self.validation_model:
+                    raise ValueError('请先导入并检查离线验证ONNX模型。')
+                if validation_model_id != self.validation_model['model_id']:
+                    raise ValueError('验证模型选择已变化，请刷新并核对当前模型。')
+                from .validation import TrialValidation
+                verifier = TrialValidation(self.validation_model, participant, description, p)
             cfg = json.loads((self.root/'configs/demo_6class.json').read_text(encoding='utf-8-sig'))
             cfg['device'] = {'source':'synthetic' if self.device.synthetic else 'neuracle_acp' if self.device.id == 'neusen_acp' else 'device_adapter',
                 'adapter':self.device.id, 'sample_rate':self.device.settings['fs'], 'channels':self.device.labels,
@@ -286,9 +302,11 @@ class Controller:
                 'recording_context': {'condition':p['condition'], 'notes':p['condition_notes']}}
             with self.lock:
                 self.protocol, self.error, self.warning = p, '', ''
+                self.phase, self.phase_meta = 'initial_rest', {}
                 self.pending_marks.clear()
                 self.subject_lease, self.subject_heartbeat = require_subject, time.perf_counter()
-                self.writer = SessionWriter(self.sessions_root, participant, description, p, cfg)
+                self.writer = SessionWriter(self.sessions_root, participant, description, p, cfg, validation=verifier)
+                self.validation = verifier
                 self.experiment = exp
             exp.thread.start()
             return {'path':str(self.writer.path) if self.writer else str(self.last_summary.get('path',''))}
@@ -424,7 +442,9 @@ class Controller:
                 'recording':self.writer is not None or self.experiment is not None, 'phase':self.phase,
                 'phase_meta':self.phase_meta, 'subject':dict(self.subject_state), 'error':self.error, 'warning':self.warning,
                 'impedance':list(self.impedances), 'logs':list(self.logs)[-15:], 'last_session':self.last_summary,
-                'protocol':self.protocol, 'display_filter':{'highpass':1,'lowpass':40,'notch':50}}
+                'protocol':self.protocol, 'display_filter':{'highpass':1,'lowpass':40,'notch':50},
+                'validation_model':copy.deepcopy(self.validation_model),
+                'validation':self.validation.snapshot() if self.validation else {'enabled':False}}
 
     def waveform(self):
         with self.lock:
@@ -473,6 +493,11 @@ class Controller:
             # One-second reception bins are computed from all arrival timestamps, not decimated points.
             wall = h['arrival_mono_ns'][begin:end]
             bins, counts = np.unique(((wall-wall[0])//1000000000) if len(wall) else np.array([],dtype=int),return_counts=True)
+        validation_path = path/'onnx_validation/summary.json'
+        validation = json.loads(validation_path.read_text(encoding='utf-8')) if validation_path.is_file() else None
+        if validation and trial:
+            validation['trials'] = [r for r in validation['trials'] if r['trial_id'] == int(trial)]
         return {'metadata':meta,'events':events,'total_samples':total,'sample_start':begin,'step':step,
+            'validation':validation,
             'times':stamps.tolist(),'values':values.tolist(),'labels':meta['device']['labels'], 'unit':meta['device']['unit'],
             'reception':{'seconds':bins.tolist(),'points':counts.tolist()}}

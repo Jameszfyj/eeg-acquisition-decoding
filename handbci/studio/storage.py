@@ -27,7 +27,7 @@ def paradigm_id(tasks):
 
 
 class SessionWriter:
-    def __init__(self, root, participant, description, protocol, config):
+    def __init__(self, root, participant, description, protocol, config, validation=None):
         participant = validate_participant_id(participant)
         if not 1 <= int(description['settings']['fs']) <= 100000 or not description['labels']:
             raise ValueError('非法采样率或通道数。')
@@ -44,6 +44,10 @@ class SessionWriter:
                                   'notes':self.protocol.get('condition_notes','')}
         self.config.setdefault('session_metadata',{})['recording_context'] = copy.deepcopy(self.recording_context)
         self.participant = participant
+        self.validation = validation
+        if validation:
+            self.config['session_metadata']['offline_validation'] = copy.deepcopy(validation.contract)
+            validation.start(self.path)
         self.count = 0
         self.error = ""
         self.summary = {}
@@ -133,7 +137,8 @@ class SessionWriter:
                     n, begin = values.shape[1], self.count
                     for name in ("eeg", "counts"):
                         ds[name].resize(begin+n, axis=1)
-                    ds["eeg"][:, begin:] = values.astype(np.float32)*self.description['count_scale']
+                    eeg = values.astype(np.float32)*self.description['count_scale']
+                    ds["eeg"][:, begin:] = eeg
                     ds["counts"][:, begin:] = values
                     wall = np.concatenate([np.full(x.counts.shape[1], x.wall_ns, np.int64) for x in batch])
                     mono = np.concatenate([np.full(x.counts.shape[1], x.mono_ns, np.int64) for x in batch])
@@ -147,6 +152,8 @@ class SessionWriter:
                         ds[name][begin:] = values1
                     self.count += n
                     h.attrs["n_samples"] = self.count
+                    if self.validation:
+                        self.validation.submit('data', (eeg, stamps, begin))
                     batch.clear()
                     pending = 0
 
@@ -157,6 +164,9 @@ class SessionWriter:
                         flush()
                         continue
                     if kind in ('event', 'fault'):
+                        if self.validation and kind == 'event' and value.get('kind') in ('prepare','cue','task_end'):
+                            flush()
+                            self.validation.submit('event', copy.deepcopy(value))
                         (all_events if kind == 'event' else faults).append(dict(value))
                         # Crash journal is written immediately; final alignment is rewritten on close.
                         journal.write(json.dumps(value, ensure_ascii=False)+"\n")
@@ -246,6 +256,13 @@ class SessionWriter:
                                 "error": self.requested_error, "participant": self.participant,
                                 'recording_context': self.recording_context,
                                 "paradigm_id": meta["paradigm_id"]}
+                if self.validation:
+                    result = self.validation.finish()
+                    meta['onnx_validation'] = self.summary['onnx_validation'] = dict(
+                        path='onnx_validation/summary.json', status=result['status'],
+                        completed_trials=result['completed_trials'], scored_trials=result['scored_trials'],
+                        correct_trials=result['correct_trials'], error=result['error'])
+                    h.attrs['metadata_json'] = json.dumps(meta, ensure_ascii=False)
                 json_write(self.path / "session.json", meta)
                 json_write(self.path / "collection_report.json", self.summary)
             with (self.path / "events.jsonl").open("w", encoding="utf-8") as journal:
@@ -255,5 +272,7 @@ class SessionWriter:
             self.error = f"{type(exc).__name__}: {exc}"
             json_write(self.path / "failure.json", {"error": self.error, "complete": False})
         finally:
+            if self.validation and not self.validation.closed.is_set():
+                self.validation.finish()
             self.ready.set()
             self.finished.set()

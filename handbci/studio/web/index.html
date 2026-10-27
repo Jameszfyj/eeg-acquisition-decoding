@@ -21,10 +21,15 @@
 <label>采集情况备注（可选）<textarea id="conditionNotes" rows="2" maxlength="1000" placeholder="补充姿势、环境或其他需要保留的情况"></textarea></label><p class="muted">采集情况对整次会话有效；切换情况请另开一次会话。情况名称不同的数据，训练入口会阻止直接混合。备注不作为任务类别。</p>
 <label>任务名称（每行一类，2至6类）<textarea id="tasks" rows="3">左手
 右手</textarea></label><div class="row timing"><label>开始 / 秒<input id="initial_rest_seconds" type="number" min="0" step="0.1" value="3"></label><label>准备 / 秒<input id="prepare_seconds" type="number" min="0.1" step="0.1" value="2"></label><label>想象 / 秒<input id="task_seconds" type="number" min="0.1" step="0.1" value="4"></label><label>休息 / 秒<input id="rest_seconds" type="number" min="0" step="0.1" value="3"></label><label>轮间休息 / 秒<input id="block_rest_seconds" type="number" min="0" step="0.1" value="10"></label></div>
+<details open><summary>ONNX 试次验证（可选）</summary>
+<div class="row"><label>验证模型 ZIP / ONNX<input id="validationFile" type="file" accept=".zip,.onnx"></label><label>单独 ONNX 的配套 manifest.json<input id="validationManifest" type="file" accept=".json"></label><button id="validationImport">导入并检查</button></div>
+<label class="check"><input id="validationEnabled" type="checkbox">每个试次结束后验证，在休息阶段显示各类分数</label>
+<p id="validationModelInfo" class="muted">尚未导入验证模型。</p><p class="muted">步长固定 0.5 秒；按模型清单取完整窗口，累计整试次票数并显示平均概率。准备锚点模型包含准备期窗口；不使用任务结束后的休息数据。结果另存到录制目录的 onnx_validation 文件夹。</p>
+<div id="validationStatus" class="muted"></div><div id="validationScores" class="validation-panel" hidden></div></details>
 <div class="row"><label class="check"><input type="checkbox" id="sound" checked>本机中文语音</label><button id="audioPrepare">准备并试听语音</button><button id="start" class="primary">进入全屏并开始采集</button><button id="abort" class="danger">中止并保留记录</button></div>
 <p class="muted">任务文字在准备与想象期间保持一致；想象起点无声音、无画面变化。记录的是程序设定窗口，无法确定真实脑内起始时刻。想象期间无倒计时或进度条。</p><p id="sessionStatus"></p></section>
 <details><summary>最近事件与异常</summary><pre id="logs"></pre></details>
 </article></main>
 <main id="review" hidden><section><h2>采后查看</h2><div class="row"><label>会话<select id="sessionList"></select></label><button id="refreshSessions">刷新记录</button><label>试次（0为整个会话）<input id="trial" type="number" min="0" value="0"></label><button id="loadSession">查看</button></div><div class="row"><label>局部起点 / 秒<input id="reviewStart" type="number" min="0" value="0"></label><label>查看长度 / 秒<input id="reviewDuration" type="number" min="1" value="10"></label><button id="loadRange">查看局部</button></div><p id="reviewMeta"></p><canvas id="reviewWave" height="500"></canvas><canvas id="rateChart" height="160"></canvas><details open><summary>事件、标签与训练条件</summary><pre id="reviewEvents"></pre></details></section></main>
-<div id="subject" hidden><button id="subjectAbort">中止采集 / Esc</button><div class="cue"><div id="subjectText">等待开始</div><div id="subjectSubtitle"></div></div><button id="return" hidden>返回工作台</button></div>
+<div id="subject" hidden><button id="subjectAbort">中止采集 / Esc</button><div class="cue"><div id="subjectText">等待开始</div><div id="subjectSubtitle"></div><div id="subjectValidation" class="validation-panel" hidden aria-live="polite"></div></div><button id="return" hidden>返回工作台</button></div>
 <script src="/app.js"></script></body></html>

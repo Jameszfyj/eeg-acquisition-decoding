@@ -274,6 +274,18 @@ class ONNXDecoder:
         self.last_prediction, self.last_window = -float('inf'), None
         self.prompted, self.anchor, self.next_start = False, None, None
 
+    def predict_window(self, processed):
+        """Shared live/replay transform; channels already follow input.channels."""
+        values = np.asarray(processed, np.float32)[None].copy()
+        if values.shape != (1, len(self.order), self.n_time):
+            raise ValueError('模型窗口长度与清单不符。')
+        norm = self.manifest['input'].get('normalization')
+        if norm:
+            values = (values-np.asarray(norm['mean'],np.float32)[None,:,None])/np.asarray(norm['std'],np.float32)[None,:,None]
+        if self.manifest['input']['pipeline'] == 'ifnet_filterbank':
+            values = filter_bank(values, self.stream.output_fs)
+        return self.predict(np.ascontiguousarray(values, dtype=np.float32))
+
     def set_prompt_anchor(self, source_index):
         if not self.prepare_aligned:
             return
@@ -306,11 +318,7 @@ class ONNXDecoder:
             if now-self.last_prediction < interval-1e-9: return None
             first = self.history.shape[1]-self.n_time
         window_indices = self.indices[first:first+self.n_time]
-        values = self.history[None,:,first:first+self.n_time].copy()
-        norm = self.manifest['input'].get('normalization')
-        if norm: values = (values-np.asarray(norm['mean'],np.float32)[None,:,None])/np.asarray(norm['std'],np.float32)[None,:,None]
-        if self.manifest['input']['pipeline'] == 'ifnet_filterbank': values = filter_bank(values, self.stream.output_fs)
-        result = self.predict(np.ascontiguousarray(values, dtype=np.float32))
+        result = self.predict_window(self.history[:,first:first+self.n_time])
         self.last_prediction = now
         self.last_window = self.stream.window_bounds(window_indices, indices[-1])
         if self.prepare_aligned and self.prompted:

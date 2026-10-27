@@ -71,9 +71,10 @@ def make_server(root, port=57373):
                 return self.send({'error':'同源验证失败，请刷新工作台。'},403)
             try:
                 length = int(self.headers.get('Content-Length','0'))
-                if not 0 < length <= 1048576: raise ValueError('请求大小无效。')
-                body = json.loads(self.rfile.read(length))
                 route = urlsplit(self.path).path
+                limit = 46*1024*1024 if route == '/api/validation/model' else 1048576
+                if not 0 < length <= limit: raise ValueError('请求大小无效。')
+                body = json.loads(self.rfile.read(length))
                 if route == '/api/connect': result = c.connect(body['adapter'],body.get('options',{}))
                 elif route == '/api/disconnect': result = c.disconnect()
                 elif route == '/api/impedance': result = c.impedance(bool(body['enabled']))
@@ -82,7 +83,9 @@ def make_server(root, port=57373):
                     wireless_host=str(body.get('wireless_host','')).strip(), wireless_port=int(body.get('wireless_port',4097)))
                 elif route == '/api/trigger/test': result = c.trigger_test()
                 elif route == '/api/audio': result = c.prepare_audio(body['protocol'])
-                elif route == '/api/start': result = c.start(body['participant'],body['protocol'],require_subject=True)
+                elif route == '/api/validation/model': result = c.import_validation(body['participant'],body['data'],body['filename'],body.get('manifest'))
+                elif route == '/api/start': result = c.start(body['participant'],body['protocol'],require_subject=True,
+                    validation=bool(body.get('validation',False)),validation_model_id=body.get('validation_model_id'))
                 elif route == '/api/subject-heartbeat':
                     import time
                     c.subject_heartbeat = time.perf_counter()
