@@ -1,0 +1,7 @@
+numpy
+scipy
+h5py
+scikit-learn
+torch
+onnx
+onnxruntime

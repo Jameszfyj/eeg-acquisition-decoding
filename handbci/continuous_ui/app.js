@@ -309,6 +309,7 @@ async function loadDetails(){
     if(next.requires_prompted_calibration&&$('collectionMode').value==='prompted')next.requires_calibration=true;
     if(next.requires_calibration&&!Object.hasOwn(next,'previous_calibration'))throw new Error('后台正在更新，暂时无法读取校准记录，请稍后刷新。');
     details=next;
+    if(details.runtime==='mi_studio_v2')text('importStatus','v2模型使用专用校准工具；校准完成后导入calibrated.pt。');
     if(!state?.running&&appliedDefaultsModel!==details.model_id){
       const fields=['decisionMode','voteWindow','voteRatio','decisionTimeout','cooldown','threshold','margin','stable','release','collectionMode','promptRest','promptPrepare','promptLoops','promptMarking','outputMode'];
       for(const id of fields)if(Object.hasOwn(details.ui_defaults||{},id))$(id).value=details.ui_defaults[id];
@@ -395,7 +396,7 @@ function updateControls(){
   const testing=['testing','cancelling'].includes(state?.eeg_connection_test?.phase)||state?.eeg_discovery?.phase==='searching'||['testing','cancelling'].includes(state?.trigger_connection_test?.phase)||state?.trigger_discovery?.phase==='searching';
   const deviceReady=!['six','four','acp'].includes($('mode').value)||!!$('host').value;
   for(const id of ['importParticipant','importName','importFile','importModel'])$(id).disabled=running||testing||busy||offline;
-  for(const id of ['calibrationImportFolder','calibrationImportZip','importCalibration'])$(id).disabled=running||testing||busy||offline||!details||!['six','acp'].includes($('mode').value);
+  for(const id of ['calibrationImportFolder','calibrationImportZip','importCalibration'])$(id).disabled=running||testing||busy||offline||!details||details.runtime==='mi_studio_v2'||!['six','acp'].includes($('mode').value);
   const handReady=$('outputMode').value!=='inspire'||!!$('handPort').value;
   for(const id of editable)$(id).disabled=running||testing||busy||offline;
   for(const input of document.querySelectorAll('#mapping select, #calibrationPanel input, #calibrationPanel select, #calibrationPanel button'))input.disabled=running||testing||busy||offline;

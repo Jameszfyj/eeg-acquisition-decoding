@@ -7,6 +7,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
+import numpy as np
 from pathlib import Path
 import secrets
 import socket
@@ -255,6 +256,26 @@ class OnlineController:
             model = folder / "model.pt"
             try:
                 model.write_bytes(data)
+                from .workbench_settings import local_settings
+                if local_settings().get('studio_v2'):
+                    import torch
+                    with torch.serialization.safe_globals([np.core.multiarray._reconstruct,np.ndarray,np.dtype,
+                            type(np.dtype(np.float64)),type(np.dtype(np.float32)),type(np.dtype(np.int64))]):
+                        probe=torch.load(model,map_location='cpu',weights_only=True)
+                    if isinstance(probe,dict) and probe.get('format')=='jixieshou.six_class_offline.v1':
+                        from .studio_v2_runtime import register_model as register_studio
+                        from .subject_online import resolve_path
+                        options=local_settings()['studio_v2']
+                        return register_studio(participant,model,resolve_path(options['source_manifest']),self.registry,name)
+                import torch
+                metadata=torch.load(model,map_location='cpu',weights_only=True)
+                if metadata.get('format')=='handbci.p01_six_retrained_20261027.v1':
+                    from .retrained_runtime import register_model as register_retrained
+                    from .subject_online import resolve_path
+                    entry=register_retrained(participant,model,self.registry,name)
+                    if resolve_path(entry['path'])!=model.resolve():
+                        model.unlink();folder.rmdir()
+                    return entry
                 payload, _ = load_model(model)
                 if checkpoint_participant(payload) != participant:
                     raise ValueError("文件内部的被试编号与填写编号不一致。")

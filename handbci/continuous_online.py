@@ -351,7 +351,8 @@ class ContinuousController(OnlineController):
         from .six_class_online import SIX_MODEL_IDS
         calibration = calibration_defaults()
         saved_path = local_path('hand_calibration', ROOT/'configs/hand_calibration_P01_20261024.json')
-        if participant == 'P01' and model_id in SIX_MODEL_IDS and saved_path.is_file():
+        personal_six=participant=='P01' and (model_id in SIX_MODEL_IDS or details.get('runtime') in ('retrained_six','mi_studio_v2'))
+        if personal_six and saved_path.is_file():
             saved = json.loads(saved_path.read_text(encoding='utf-8-sig'))
             if (saved.get('participant_id') == participant
                     and saved.get('all_target_poses_user_confirmed') is True):
@@ -361,7 +362,7 @@ class ContinuousController(OnlineController):
                 details['hand_connection'] = connection_options(saved)
         details.update(hand_actions=ACTION_LABELS, hand_channels=CHANNELS,
                        hand_calibration=calibration)
-        if participant == 'P01' and model_id in SIX_MODEL_IDS:
+        if personal_six:
             details['hand_mapping_revision'] = 'P01-feet-pinch-tongue-little-v1'
         preferences = model_preferences(model_id)
         mapping = preferences.get('hand_actions')
@@ -400,6 +401,10 @@ class ContinuousController(OnlineController):
                     "model": "无需模型；概率由演示程序生成"}
         details = super().model_details(participant, model_id)
         details["classes"] = self.display_classes(details["classes"])
+        if details.get('runtime')=='mi_studio_v2':
+            details.update(input_note='v2按准备提示对齐2秒窗口；专用校准头已载入，实时预测不使用目标标签。',
+                calibration_history=[],unavailable_calibrations=[],previous_calibration=None)
+            return details
         if details['source'] == 'neuracle_acp':
             from .shared_calibration import SharedCalibrationStore, imported_protocol
             selection, cfg = prepare_subject_model(participant, model_id, registry=self.registry)
@@ -410,6 +415,8 @@ class ContinuousController(OnlineController):
                 calibration_rest_seconds=protocol['rest_seconds'],calibration_history=history['available'],
                 unavailable_calibrations=history['unavailable'],
                 previous_calibration=history['available'][0] if history['available'] else None)
+            if selection.get('runtime')=='retrained_six':
+                details.update(requires_calibration=True,calibration_method=selection['calibration_method'])
         return details
 
     @staticmethod
@@ -511,13 +518,23 @@ class ContinuousController(OnlineController):
             classes = self.display_classes(cfg["classes"], request.get("actions"), request.get("hand_actions"))
             needs_calibration = mode == 'acp' and (request.get('session_purpose') == 'calibration'
                 or request.get('prompted', {}).get('enabled')
-                or (request.get('calibration_mode') == 'reuse' and request.get('calibration_source')))
+                or (request.get('calibration_mode') == 'reuse' and request.get('calibration_source'))
+                or selection.get('runtime')=='retrained_six')
+            if selection.get('runtime')=='mi_studio_v2':
+                if not selection.get('studio_calibration_ready'):
+                    raise ValueError('v2模型请先在专用校准工具完成校准，再导入calibrated.pt。')
+                if request.get('session_purpose')=='calibration':
+                    raise ValueError('v2模型使用专用特征分类头校准，请打开MI Studio v2。')
+                needs_calibration=False
             if needs_calibration:
                 from .shared_calibration import SharedCalibrationStore, imported_protocol
                 protocol = imported_protocol(cfg)
                 selection.update(requires_calibration=True, imported_calibration=True,
                     calibration_rounds=protocol['rounds'], calibration_trials=protocol['trials'],
                     calibration_method='model_specific_logit_bias_v1',backbone_updated=False)
+                if selection.get('runtime')=='retrained_six':
+                    from .retrained_runtime import CALIBRATION_METHOD
+                    selection['calibration_method']=CALIBRATION_METHOD
                 cfg['session_metadata']['brain_calibration'] = protocol
                 calibration_mode = request.get('calibration_mode', 'new')
                 if calibration_mode not in ('new','reuse'):
@@ -558,6 +575,12 @@ class ContinuousController(OnlineController):
         elif selection.get('runtime') == 'onnx':
             from .model_bundle import ONNXDecoder
             ONNXDecoder(selection['model'])
+        elif selection.get('runtime')=='retrained_six':
+            from .retrained_runtime import load_portable
+            load_portable(selection['model'],selection['sha256'])
+        elif selection.get('runtime')=='mi_studio_v2':
+            from .studio_v2_runtime import StudioV2Decoder
+            StudioV2Decoder(selection['model'],cfg,selection['sha256'])
         elif mode == 'six':
             from .six_class_online import load_checkpoint
             if selection.get('right_hand_review'):
@@ -1161,9 +1184,15 @@ class ContinuousController(OnlineController):
                 with self.condition:
                     self.calibration_decoder = decoder
                     self.state['calibration'] = decoder.snapshot_calibration()
+        elif selection.get('runtime') == 'mi_studio_v2':
+            from .studio_v2_runtime import StudioV2Decoder
+            decoder = StudioV2Decoder(selection['model'],cfg,selection['sha256'])
         elif selection.get('runtime') == 'onnx':
             from .model_bundle import ONNXDecoder
             decoder = ONNXDecoder(selection['model'])
+        elif selection.get('runtime')=='retrained_six':
+            from .retrained_runtime import RetrainedStreamDecoder
+            decoder=RetrainedStreamDecoder(selection['model'],cfg,selection['sha256'])
         else:
             payload, model = load_model(selection["model"], "cpu")
             decoder = OnlineDecoder(payload, model)
@@ -1215,6 +1244,14 @@ class ContinuousController(OnlineController):
         started = time.perf_counter()
         with self.condition:
             self.waveform_preview.append(raw, ix)
+        if hasattr(decoder,'set_prompt_anchor') and self.prompted is not None:
+            mark=self.prompted.prepare_mark
+            anchor=None
+            if mark and not mark.get('verification_pending'):
+                anchor=(round((mark['observed_device_ms']-self.prompted_origin_ms)*decoder.stream.fs/1000)
+                        if mark.get('echo_verified') and mark.get('observed_device_ms') is not None
+                        and self.prompted_origin_ms is not None else mark.get('estimated_source_index'))
+            decoder.set_prompt_anchor(anchor)
         result = decoder.process(raw, ix)
         ms = (time.perf_counter()-started)*1000
         calibration = decoder.snapshot_calibration() if hasattr(decoder, 'snapshot_calibration') else None
@@ -1597,6 +1634,9 @@ def main(argv=None):
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args(argv)
+    if local_settings().get('studio_v2'):
+        from .studio_v2_runtime import ensure_tool_server
+        ensure_tool_server()
     existing = existing_workbench_url(args.port)
     if existing:
         open_existing_workbench(existing, no_browser=args.no_browser)

@@ -162,6 +162,8 @@ class CalibrationImports:
             protocol=calibration_protocol(cfg)
         else:
             selection,cfg=prepare_subject_model(participant,model_id,registry=self.controller.registry)
+            if selection.get('runtime')=='mi_studio_v2':
+                raise ValueError('v2模型请在MI Studio v2中选择原始会话校准，完成后导入calibrated.pt。')
             if cfg['device']['source'] not in ('neuracle_acp','synthetic_tcp'):
                 raise ValueError('当前模型不支持本项目采集数据校准。')
             protocol=imported_protocol(cfg)
@@ -236,7 +238,7 @@ class CalibrationImports:
                 self._extract(folder)
                 selection,cfg,protocol=self._target(state['participant'],state['model_id'])
                 result=read_acquisition(folder,cfg,protocol)
-                if selection.get('source')=='p01_six_acp_observation':
+                if selection.get('source')=='p01_six_acp_observation' or selection.get('runtime')=='retrained_six':
                     support=3.9
                 else:
                     pipeline=(json.loads((Path(selection['model'])/'manifest.json').read_text(encoding='utf-8'))['input']['pipeline']

@@ -14,6 +14,7 @@ dependencies = ["numpy>=1.26,<3", "scipy>=1.11,<2", "h5py>=3.10,<4", "pyserial>=
 [project.optional-dependencies]
 decode = ["torch>=2.5,<3", "onnx>=1.18,<2", "onnxruntime>=1.20,<2"]
 dev = ["build>=1.2"]
+studio-v2 = ["numpy>=1.26,<2", "scikit-learn>=1.3,<2"]
 
 [project.scripts]
 eeg-acquire = "handbci.studio.server:main"
@@ -23,9 +24,10 @@ eeg-pack-model = "handbci.model_bundle:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["handbci*", "configs", "assets"]
+include = ["handbci*", "mi_studio_v2*", "configs", "assets"]
 
 [tool.setuptools.package-data]
 handbci = ["*.json", "ui/*", "online_ui/*", "continuous_ui/*", "viewer_ui/*", "studio/web/*"]
 configs = ["*.json"]
 assets = ["task_cues_20261025/*.png"]
+mi_studio_v2 = ["web/static/*", "*.md"]

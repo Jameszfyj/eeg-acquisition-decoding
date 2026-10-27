@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MI Studio · 源生成与源校准</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%234f46e5'/%3E%3Ctext x='32' y='43' font-size='30' text-anchor='middle' fill='white'%3EMI%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">MI</div>
+    <div>
+      <h1>MI Studio</h1>
+      <p>六类运动想象 · 源模型生成与源校准</p>
+    </div>
+  </div>
+  <div class="top-right">
+    <div id="backend" class="pill">连接中…</div>
+    <select id="job-history" title="最近任务"><option value="">最近任务…</option></select>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="col">
+    <div class="card mode-card">
+      <div class="tabs" role="tablist">
+        <button class="tab active" data-mode="train">源模型训练</button>
+        <button class="tab" data-mode="calibrate">源模型校准</button>
+      </div>
+      <p id="mode-hint" class="muted"></p>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2><span class="step">1</span> 数据源</h2>
+        <div class="actions">
+          <button id="confirm-all" class="ghost small">全部确认</button>
+          <span id="src-count" class="badge">0 个 Session</span>
+        </div>
+      </div>
+      <div class="add-row">
+        <input id="path-input" placeholder="会话目录路径，例如 训练数据/20261023_165123_6d75003f_P01">
+        <button id="browse-btn" class="ghost">浏览</button>
+        <button id="scan-btn" class="primary">扫描</button>
+      </div>
+      <div id="source-list" class="source-list"></div>
+      <p class="hint">一个目录 = 一个 Session。每个标签都必须逐行确认；「不使用」也是一次显式确认。</p>
+    </div>
+
+    <div class="card" id="model-card" hidden>
+      <div class="card-head">
+        <h2><span class="step">2</span> 源模型</h2>
+        <button id="model-list-btn" class="ghost small">选择已有模型</button>
+      </div>
+      <div class="add-row">
+        <input id="model-input" placeholder="源模型 .pt 路径">
+        <button id="model-btn" class="primary">载入</button>
+      </div>
+      <div id="model-info" class="model-info"></div>
+      <label class="check" id="legacy-profile-wrap" hidden><input type="checkbox" id="legacy-profile-confirm"> 源模型没有可验证的预处理口径；我确认使用上面选择的口径</label>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2><span class="step" id="outputs-step">2</span> 6 维输出语义</h2>
+        <span id="outputs-lock" class="badge lock">必须显式确认</span>
+      </div>
+      <div id="outputs" class="outputs"></div>
+      <label class="check"><input type="checkbox" id="outputs-confirm"> 我确认以上 6 维输出含义（顺序即模型列顺序）</label>
+      <p class="hint" id="outputs-hint">源模型必须显式给出 6 个输出维度的含义；校准模型会原样继承源模型 metadata，不允许改动。</p>
+    </div>
+  </section>
+
+  <section class="col">
+    <div class="card" id="run-card">
+      <div class="card-head">
+        <h2><span class="step">3</span> 运行</h2>
+        <span class="badge" id="run-mode-badge">源生成</span>
+      </div>
+      <div class="params">
+        <label>预处理口径
+          <select id="profile"></select>
+        </label>
+        <label>设备
+          <select id="device"><option value="auto">自动</option><option value="cpu">CPU</option><option value="cuda">GPU (CUDA)</option></select>
+        </label>
+        <label>随机种子
+          <input id="seed" type="number" value="0" min="0" max="99999">
+        </label>
+        <label>任务名
+          <input id="job-name" placeholder="例如 六类源模型-1023">
+        </label>
+      </div>
+
+      <div id="train-params">
+        <div class="params">
+          <label>训练档位
+            <select id="preset">
+              <option value="quick">快速冒烟（20/10/20）</option>
+              <option value="standard" selected>标准（200/30/200）</option>
+              <option value="long">长训练（300/40/300）</option>
+              <option value="custom">自定义</option>
+            </select>
+          </label>
+          <label>预训练轮数<input id="pre-epochs" type="number" value="200" min="1"></label>
+          <label>头训练轮数<input id="head-epochs" type="number" value="30" min="1"></label>
+          <label>微调轮数<input id="ft-epochs" type="number" value="200" min="1"></label>
+          <label>早停耐心<input id="patience" type="number" value="40" min="1"></label>
+          <label>batch<input id="batch" type="number" value="128" min="1"></label>
+        </div>
+        <div class="params">
+          <label>评估方式
+            <select id="eval-mode">
+              <option value="holdout" selected>留出一份会话</option>
+              <option value="loso">逐会话 LOSO</option>
+              <option value="none">不评估，只训全量</option>
+            </select>
+          </label>
+          <label class="check inline"><input type="checkbox" id="final-fit" checked> 评估后做内部验证拟合（约 85%）</label>
+          <label class="check inline"><input type="checkbox" id="export-onnx-train" checked> 同时导出 ONNX</label>
+        </div>
+        <p class="hint">留出会话只用于评分；早停、SVM 初始化与 scaler 只用训练侧数据。交付模型用训练侧 85% 拟合、15% 只做内部验证（不参与任何权重更新）。单份会话时会自动改为「会话内试次留出（诊断）」。</p>
+      </div>
+
+      <div id="cal-params" hidden>
+        <div class="params">
+          <label>C（L2 正则）
+            <input id="cal-c" type="number" value="1.0" step="0.1" min="0.01">
+          </label>
+          <label>每类留出试次
+            <input id="cal-holdout" type="number" value="1" min="1">
+          </label>
+          <label class="check inline"><input type="checkbox" id="export-onnx-cal" checked> 同时导出 ONNX</label>
+        </div>
+        <p class="hint">校准只在冻结的源特征上重拟合 6 列线性头；latent scaler 沿用源模型，不重拟合。留出试次用于 before/after 对照，保存的是全量重拟合的头。</p>
+      </div>
+
+      <label class="check" id="many-wrap" hidden><input type="checkbox" id="many-confirm"> 存在多对一映射，我确认这些源标签合并到同一输出列</label>
+      <div class="run-actions">
+        <button id="run-btn" class="primary big">开始运行</button>
+        <button id="cancel-btn" class="danger" hidden>停止任务</button>
+        <span id="run-note" class="muted"></span>
+      </div>
+      <details class="cli-box">
+        <summary>命令行等价配置（同一份 JSON）</summary>
+        <pre id="cli-preview"></pre>
+      </details>
+    </div>
+
+    <div class="card" id="job-card" hidden>
+      <div class="card-head">
+        <h2>任务运行</h2>
+        <span id="job-state" class="badge">等待中</span>
+      </div>
+      <div id="progress" class="progress"><div id="progress-bar"></div></div>
+      <div class="log" id="log"></div>
+      <div id="result" class="result"></div>
+    </div>
+  </section>
+</main>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-box">
+    <div class="modal-head">
+      <h3 id="modal-title">选择目录</h3>
+      <button id="modal-close" class="ghost">关闭</button>
+    </div>
+    <div class="modal-path" id="modal-path"></div>
+    <div class="modal-list" id="modal-list"></div>
+    <div class="modal-foot">
+      <button id="modal-up" class="ghost">上一级</button>
+      <button id="modal-pick" class="primary">选择此目录</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

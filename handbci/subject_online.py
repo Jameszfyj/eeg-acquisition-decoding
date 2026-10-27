@@ -106,11 +106,20 @@ def prepare_subject_model(participant, model_id=None, *, registry=DEFAULT_REGIST
             raise ValueError("所选模型不属于该被试，或模型编号不存在。")
         entry = chosen[0]
     path = resolve_path(entry["path"])
+    if entry.get('runtime') == 'mi_studio_v2':
+        from .studio_v2_runtime import prepare_entry
+        if config_path is not None:raise ValueError('v2模型使用其登记的部署输入配置。')
+        return prepare_entry(entry,path)
     if entry.get('runtime') == 'onnx':
         from .model_bundle import prepare_entry
         if config_path is not None:
             raise ValueError('ONNX模型包使用其manifest输入约定；修改后请重新打包导入。')
         return prepare_entry(entry, path.parent)
+    if entry.get('runtime') == 'retrained_six':
+        from .retrained_runtime import prepare_entry
+        if config_path is not None:
+            raise ValueError('重训模型使用权重内保存的输入约定。')
+        return prepare_entry(entry,path)
     if file_sha256(path) != entry["sha256"]:
         raise ValueError("登记后的模型文件发生变化；请核对文件并重新登记，当前不会连接数据源。")
     payload, _ = load_model(path, "cpu")

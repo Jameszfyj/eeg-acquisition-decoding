@@ -301,6 +301,12 @@ class PromptedControl:
     def eligible(self, window):
         if self.phase != 'decoding' or window is None:
             return False
+        if window.get('profile')=='l100d250h4_pre_v2' and window.get('anchor')=='prepare':
+            anchor=window.get('prepare_source_index')
+            expected=self.prepare_mark.get('source_cutoff',self.prepare_mark.get('estimated_source_index')) if self.prepare_mark else None
+            return (anchor is not None and expected is not None and abs(anchor-expected)<=2
+                    and window['model_start_index']>=anchor
+                    and window['source_start_index']>=anchor-round(self.fs)-4)
         # Same full raw support test as continuous decoding, including FIR history
         # and every window used by the improved models. No pre-cue votes leak in.
         if self.cue.get('echo_verified'):
@@ -310,6 +316,8 @@ class PromptedControl:
         return window['source_start_index'] >= self.cutoff
 
     def before_prediction(self, window, origin_ms):
+        if self.prepare_mark and self.prepare_mark.get('echo_verified') and origin_ms is not None:
+            self.prepare_mark['source_cutoff']=round((self.prepare_mark['observed_device_ms']-origin_ms)*self.fs/1000)
         if self.cue and self.cue.get('echo_verified') and origin_ms is not None:
             self.cue['source_cutoff'] = round((self.cue['observed_device_ms']-origin_ms)*self.fs/1000)
         return self.eligible(window)

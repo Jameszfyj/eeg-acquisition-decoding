@@ -140,6 +140,10 @@ class SharedCalibrationStore:
             calibration_sha256=digest(path/'calibration.json'), model_independent=True)
         summary.update(external_acquisition=external,imagery_seconds=duration,
                        prepare_seconds=source_protocol.get('prepare_seconds'))
+        if (path/'calibration_import.json').is_file():
+            origin=json.loads((path/'calibration_import.json').read_text(encoding='utf-8'))
+            summary.update(source_sha256=origin['source_sha256'],source_session_id=origin.get('source_session_id'),
+                           import_metadata_sha256=digest(path/'calibration_import.json'))
         result = dict(summary=summary, path=path, metadata=metadata)
         if arrays:
             with np.load(path/'calibration_raw.npz', allow_pickle=False) as values:
@@ -224,7 +228,8 @@ class ImportedCalibrationDecoder:
     def __init__(self, base, cfg, selection):
         self.base, self.stream, self.cfg, self.selection = base, base.stream, cfg, selection
         self.protocol = imported_protocol(cfg)
-        support = cfg['window']['seconds']+getattr(base.stream,'history_source_samples',0)/self.stream.fs
+        support = max(cfg['window']['seconds']+getattr(base.stream,'history_source_samples',0)/self.stream.fs,
+                      getattr(base,'required_calibration_seconds',0))
         if support > self.protocol['imagery_seconds']:
             raise ValueError('模型窗口及滤波历史超过6秒想象时长，无法按当前设置校准。')
         self.names = [c.get('task_text') or c['name'] for c in cfg['classes']]
@@ -276,13 +281,19 @@ class ImportedCalibrationDecoder:
                     source_index=self.started_index,physical_event_time_verified=False))
             return dict(ok=True)
 
-    def _fit(self, raw, labels, starts):
-        self.bias = fit_bias(replay_probabilities(self.base,raw,starts,self.cfg),labels)
+    def _fit(self, raw, labels, starts, source_summary=None):
+        if hasattr(self.base,'fit_calibration'):
+            self.base.fit_calibration(raw,labels,starts,source_summary)
+            # Ready-state sentinel; no generic bias is added to the dedicated
+            # model's own EA/residual calibration output.
+            self.bias=np.zeros(len(self.names),float)
+        else:
+            self.bias = fit_bias(replay_probabilities(self.base,raw,starts,self.cfg),labels)
         reset_decoder(self.base, self.latest_index+1)
 
     def restore_calibration(self, saved):
         with self.lock:
-            self._fit(saved['raw'],saved['labels'],saved['starts'])
+            self._fit(saved['raw'],saved['labels'],saved['starts'],saved['summary'])
             self.tasks = saved['labels'].tolist()
             self.completed, self.phase, self.audio_enabled = self.total, 'complete', False
             self.reused_from = copy.deepcopy(saved['summary'])
@@ -306,6 +317,9 @@ class ImportedCalibrationDecoder:
                     return None
                 self.last_details = dict(uncalibrated_probabilities=np.asarray(prediction[1]).tolist(),
                     calibration_method='model_specific_logit_bias_v1',bias=self.bias.tolist())
+                if hasattr(self.base,'fit_calibration'):
+                    self.last_details=dict(self.base.last_details)
+                    return prediction
                 scores = np.log(np.maximum(prediction[1],1e-12))+self.bias
                 return prediction[0], np.exp(scores-logsumexp(scores))
             if self.phase == 'warming':
@@ -339,7 +353,9 @@ class ImportedCalibrationDecoder:
             complete = self.bias is not None
             write_json(Path(session)/'calibration.json',dict(state=self.snapshot_calibration(),protocol=self.protocol,
                 complete=complete,events=self.events,labels_used=True,reused_from=self.reused_from,
-                method='model_specific_logit_bias_v1',bias=self.bias.tolist() if complete else None,
+                method=self.selection.get('calibration_method','model_specific_logit_bias_v1'),bias=self.bias.tolist() if complete else None,
                 model_sha256=self.selection.get('sha256'),backbone_updated=False,physical_event_time_verified=False))
+            if complete and hasattr(self.base,'save_model_calibration'):
+                self.base.save_model_calibration(Path(session)/'model_calibration.npz')
             if complete and not self.reused_from:
                 self.data.save(session)
