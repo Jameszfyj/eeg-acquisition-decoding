@@ -119,6 +119,32 @@ class CalibrationProtocolTests(unittest.TestCase):
         decoder.history = np.random.default_rng(4).normal(size=(30, 2000)).astype(np.float32)
         self.assertEqual(decoder._trial_windows().shape, (3, 30, 500))
 
+    def test_original_six_class_adapter_restores_external_four_second_eeg(self):
+        from handbci.shared_calibration import RawCalibrationData, SharedCalibrationStore
+        cfg=self.config()
+        online=self.decoder(cfg)
+        protocol=dict(online.protocol,external_acquisition=True,prepare_seconds=2.4,imagery_seconds=4.,
+                      rest_seconds=3.,raw_samples_per_trial=3996)
+        raw=RawCalibrationData(cfg,protocol)
+        rng=np.random.default_rng(19)
+        for trial in range(120):
+            raw.windows.append(rng.normal(size=(32,3996)).astype(np.float32))
+            raw.labels.append(trial%6);raw.starts.append(600+trial*10000)
+        with tempfile.TemporaryDirectory() as root:
+            sid='20260101_120000_1234abcd_S01'
+            path=Path(root)/sid;path.mkdir()
+            device=dict(info=dict(type='test',serial='example',cap='test-cap',labels_verified=True),
+                        labels=cfg['device']['channels'],settings=dict(fs=1000),unit='uV')
+            (path/'device.json').write_text(json.dumps(device),encoding='utf-8')
+            raw.save(path)
+            (path/'calibration.json').write_text(json.dumps(dict(complete=True,state=dict(ready=True,completed=120,total=120))),encoding='utf-8')
+            selection=dict(participant_id='S01',model_id='six-class-test',sha256='test',hand_supervised_calibration=True)
+            saved=CalibrationStore(root).load(sid,selection,cfg)
+            online.restore_calibration(saved)
+            self.assertTrue(online.snapshot_calibration()['ready'])
+            self.assertEqual(np.stack(online.windows).shape,(360,30,500))
+            self.assertEqual(online.completed,120)
+
 
 if __name__ == '__main__':
     unittest.main()

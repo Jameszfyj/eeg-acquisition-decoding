@@ -33,7 +33,7 @@ function showMessage(message,error=false){const box=$(error?'errorBox':'notice')
 function clearMessages(){ $('errorBox').hidden=true; $('notice').hidden=true; }
 async function api(path,payload){
   const options = payload===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json','X-Online-Token':token},body:JSON.stringify(payload)};
-  const abort=new AbortController(),timer=setTimeout(()=>abort.abort(),path==='/api/trigger/check'?40000:20000);
+  const abort=new AbortController(),timer=setTimeout(()=>abort.abort(),path==='/api/calibration/import/finish'?300000:path==='/api/trigger/check'?40000:20000);
   options.signal=abort.signal;
   try{
     const response=await fetch(path,options);let data;
@@ -365,7 +365,7 @@ function populateSavedCalibrations(){
   let preferred=old;try{preferred=localStorage.getItem('brain-calibration-choice:'+details.participant_id+':'+details.model_id)||old;}catch{}
   if(state?.running&&state.selection?.calibration_reuse)preferred=state.selection.calibration_reuse.id;
   $('savedCalibration').replaceChildren(option('',records.length?'选择完整校准记录':'暂无完整可复用记录'));
-  for(const c of records)$('savedCalibration').append(option(c.id,`${c.saved_at} · ${c.calibration_trials||calibrationTotal()}/${c.calibration_trials||calibrationTotal()}${c.shared_calibration_input?' · 共用脑电/重算本模型':''} · ${c.id}`));
+  for(const c of records)$('savedCalibration').append(option(c.id,`${c.saved_at} · ${c.calibration_trials||calibrationTotal()}/${c.calibration_trials||calibrationTotal()}${c.external_acquisition?' · 外部采集/想象'+c.imagery_seconds+'秒':c.shared_calibration_input?' · 共用脑电/重算本模型':''} · ${c.id}`));
   for(const c of details?.unavailable_calibrations||[]){const o=option('unavailable:'+c.id,`${c.id} · 不可用：${c.reason}`);o.disabled=true;$('savedCalibration').append(o);}
   if(records.length)$('savedCalibration').value=records.some(c=>c.id===preferred)?preferred:records[0].id;
   return selectedCalibration();
@@ -373,7 +373,7 @@ function populateSavedCalibrations(){
 function renderSavedCalibrationInfo(){
   const previous=selectedCalibration();
   $('savedCalibrationField').hidden=!details?.requires_calibration;
-  text('brainCalibrationHistory',previous?`所选校准：${previous.saved_at} · ${calibrationTotal()} / ${calibrationTotal()} · 设备 ${previous.device.serial}${previous.shared_calibration_input?' · 使用原校准脑电，按当前模型重算参数':''}`:`没有完整可复用的校准；完成${calibrationTotal()}次任务并保存后会出现在这里。`);
+  text('brainCalibrationHistory',previous?`所选校准：${previous.saved_at} · ${calibrationTotal()} / ${calibrationTotal()} · 设备 ${previous.device.serial||'人工源'}${previous.external_acquisition?' · 外部采集：准备'+previous.prepare_seconds+'秒，想象'+previous.imagery_seconds+'秒':''}${previous.shared_calibration_input?' · 使用原校准脑电，按当前模型重算参数':''}`:`没有完整可复用的校准；完成${calibrationTotal()}次任务并保存，或从左侧导入外部校准数据。`);
   const unavailable=details?.unavailable_calibrations||[];
   text('calibrationUnavailable',unavailable.length?`${unavailable.length}条原记录不可用；最近一条：${unavailable[0].reason}`:'');
 }
@@ -395,6 +395,7 @@ function updateControls(){
   const testing=['testing','cancelling'].includes(state?.eeg_connection_test?.phase)||state?.eeg_discovery?.phase==='searching'||['testing','cancelling'].includes(state?.trigger_connection_test?.phase)||state?.trigger_discovery?.phase==='searching';
   const deviceReady=!['six','four','acp'].includes($('mode').value)||!!$('host').value;
   for(const id of ['importParticipant','importName','importFile','importModel'])$(id).disabled=running||testing||busy||offline;
+  for(const id of ['calibrationImportFolder','calibrationImportZip','importCalibration'])$(id).disabled=running||testing||busy||offline||!details||!['six','acp'].includes($('mode').value);
   const handReady=$('outputMode').value!=='inspire'||!!$('handPort').value;
   for(const id of editable)$(id).disabled=running||testing||busy||offline;
   for(const input of document.querySelectorAll('#mapping select, #calibrationPanel input, #calibrationPanel select, #calibrationPanel button'))input.disabled=running||testing||busy||offline;
@@ -942,3 +943,39 @@ $('importModel').addEventListener('click',async()=>{
 });
 
 for(const id of ['host','port'])$(id).addEventListener('input',updateControls);
+
+$('calibrationImportFolder').addEventListener('change',()=>{$('calibrationImportZip').value='';});
+$('calibrationImportZip').addEventListener('change',()=>{$('calibrationImportFolder').value='';});
+$('importCalibration').addEventListener('click',()=>action($('importCalibration'),async()=>{
+  let upload=null;
+  try{
+    let selected=[];
+    const zipped=$('calibrationImportZip').files[0];
+    if(zipped)selected=[{name:'session.zip',file:zipped}];
+    else{
+      const files=[...$('calibrationImportFolder').files].filter(f=>['session.json','data.h5'].includes(f.name));
+      const parents=new Set(files.map(f=>(f.webkitRelativePath||f.name).split('/').slice(0,-1).join('/')));
+      if(files.length!==2||parents.size!==1||new Set(files.map(f=>f.name)).size!==2)throw Error('请选择单个采集会话文件夹，其中须包含session.json和data.h5。');
+      selected=files.map(file=>({name:file.name,file}));
+    }
+    if(!selected.length)throw Error('请先选择采集会话文件夹或ZIP。');
+    text('calibrationImportStatus','正在准备本机导入…');
+    upload=await api('/api/calibration/import/open',{participant:$('participant').value,model_id:$('model').value,files:selected.map(x=>({name:x.name,size:x.file.size}))});
+    const total=selected.reduce((n,x)=>n+x.file.size,0);let done=0;
+    for(const {name,file} of selected){
+      for(let offset=0;offset<file.size;offset+=upload.chunk_bytes){
+        const chunk=file.slice(offset,offset+upload.chunk_bytes);
+        const response=await fetch('/api/calibration/import/chunk?'+new URLSearchParams({id:upload.id,name,offset:String(offset)}),{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Online-Token':token},body:chunk});
+        const result=await response.json();if(!response.ok)throw Error(result.error||'校准数据上传失败。');
+        done+=chunk.size;text('calibrationImportStatus',`正在导入：${Math.round(done/total*100)}%`);
+      }
+    }
+    text('calibrationImportStatus','正在检查任务标签、时长、通道与原始脑电，请稍候…');
+    const result=await api('/api/calibration/import/finish',{id:upload.id});upload=null;
+    try{localStorage.setItem('brain-calibration-choice:'+$('participant').value+':'+$('model').value,result.summary.id);}catch{}
+    await loadDetails();
+    if(details?.requires_calibration){$('savedCalibration').value=result.summary.id;$('brainCalibrationMode').value='reuse';calibrationChoiceChanged();}
+    text('calibrationImportStatus',result.message);showMessage(result.message);
+  }catch(error){text('calibrationImportStatus','导入失败：'+error.message);throw error;}
+  finally{if(upload)await api('/api/calibration/import/cancel',{id:upload.id}).catch(()=>{});}
+}));

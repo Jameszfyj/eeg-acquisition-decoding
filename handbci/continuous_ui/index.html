@@ -23,6 +23,13 @@
       <button id="importModel" class="button secondary">导入并检查</button>
       <p id="importStatus" class="field-note" role="status">支持ONNX模型包ZIP及本项目IFNet格式PT，最多32MB。导入不会连接设备。</p>
     </details>
+    <details class="side-details"><summary>导入外部校准数据</summary>
+      <p class="field-note">先选对应被试和模型，再选择本项目采集平台保存的单个完整会话文件夹或ZIP。保留session.json和data.h5；支持20轮、想象4秒的记录。准备时长可变，按实际想象起止标记提取脑电。</p>
+      <label class="field">会话文件夹<input id="calibrationImportFolder" type="file" webkitdirectory directory multiple></label>
+      <label class="field">或会话ZIP<input id="calibrationImportZip" type="file" accept=".zip"></label>
+      <button id="importCalibration" class="button secondary">导入校准数据</button>
+      <p id="calibrationImportStatus" class="field-note" role="status">只在本机导入，不连接设备。</p>
+    </details>
     <div id="deviceFields" hidden>
       <label class="field">脑电设备<select id="eegDevice"><option value="">正在自动搜索设备…</option></select></label>
       <div class="two-fields"><label class="field">设备IP（可手填）<input id="host" placeholder="搜索或填写实际IP"></label><label class="field">ACP端口<input id="port" type="number" min="1" max="65535" value="4097"></label></div>

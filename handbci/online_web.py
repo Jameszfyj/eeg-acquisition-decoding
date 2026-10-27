@@ -278,6 +278,8 @@ def create_online_server(controller, *, port=0, assets=None):
     assets = Path(assets) if assets else Path(__file__).resolve().parent / "online_ui"
     from .screen_recording import ScreenRecordings
     recordings = ScreenRecordings(controller.output_root/'screen_recordings')
+    from .calibration_import import CalibrationImports
+    calibration_imports = CalibrationImports(controller)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -376,6 +378,15 @@ def create_online_server(controller, *, port=0, assets=None):
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 parsed = urlsplit(self.path)
+                if parsed.path == '/api/calibration/import/chunk':
+                    if not 0 < length <= calibration_imports.MAX_CHUNK:
+                        raise ValueError('校准上传分段须不超过8MB。')
+                    query = parse_qs(parsed.query)
+                    data = self.rfile.read(length)
+                    if len(data) != length:raise ValueError('校准数据分段不完整。')
+                    self.reply(200,calibration_imports.append(query.get('id',[''])[0],
+                        query.get('name',[''])[0],int(query.get('offset',['-1'])[0]),data))
+                    return
                 if parsed.path == '/api/recording/chunk':
                     if not 0 < length <= recordings.MAX_CHUNK:
                         raise ValueError('录屏分段须不超过16MB。')
@@ -393,6 +404,12 @@ def create_online_server(controller, *, port=0, assets=None):
                     raise ValueError("请求须为JSON对象。")
                 if self.path == "/api/check":
                     self.reply(200, controller.check(payload))
+                elif self.path == '/api/calibration/import/open':
+                    self.reply(200,calibration_imports.open(payload))
+                elif self.path == '/api/calibration/import/finish':
+                    self.reply(200,calibration_imports.finish(payload))
+                elif self.path == '/api/calibration/import/cancel':
+                    self.reply(200,calibration_imports.cancel(payload))
                 elif self.path == '/api/recording/open':
                     self.reply(200, recordings.open(payload))
                 elif self.path == '/api/recording/finish':

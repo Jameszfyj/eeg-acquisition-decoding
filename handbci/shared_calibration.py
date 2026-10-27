@@ -107,6 +107,13 @@ class SharedCalibrationStore:
         source_protocol = metadata.get('protocol', {})
         wanted = [x[1] for x in signatures(cfg)]
         available = [x[1] for x in metadata.get('classes', [])]
+        external = source_protocol.get('external_acquisition') is True
+        duration = source_protocol.get('imagery_seconds',0)
+        raw_count = source_protocol.get('raw_samples_per_trial',round(duration*device['sample_rate']))
+        timing_matches = (source_protocol.get('rounds') == protocol['rounds'] and
+            ((external and 4 <= duration <= 30 and type(raw_count) is int
+              and 3.9*device['sample_rate'] <= raw_count <= duration*device['sample_rate'])
+             or (not external and all(source_protocol.get(key)==protocol[key] for key in ('imagery_seconds','rest_seconds')))))
         if (metadata.get('format') != FORMAT or metadata.get('complete') is not True
                 or metadata.get('participant_id') != cfg['session_metadata']['participant_id']
                 or metadata.get('synthetic') != synthetic or metadata.get('sample_rate') != device['sample_rate']
@@ -115,8 +122,8 @@ class SharedCalibrationStore:
                 or len(available) != len(set(available)) or len(wanted) != len(set(wanted))
                 or not set(wanted).issubset(available)
                 or any(c not in metadata['channels'] for c in device['channels'])
-                or any(source_protocol.get(key) != protocol[key] for key in ('rounds','imagery_seconds','rest_seconds'))):
-            raise ValueError('共用校准的被试、任务、通道、单位、采样率或20轮时序不匹配。')
+                or not timing_matches):
+            raise ValueError('共用校准的被试、任务、通道、单位、采样率或校准轮数不匹配。')
         calibration = json.loads((path/'calibration.json').read_text(encoding='utf-8'))
         state = calibration.get('state', {})
         if (calibration.get('complete') is not True or not state.get('ready')
@@ -131,12 +138,14 @@ class SharedCalibrationStore:
             device=metadata['device'], shared_calibration_input=True,
             arrays_sha256=metadata['arrays_sha256'], metadata_sha256=digest(path/'calibration_data.json'),
             calibration_sha256=digest(path/'calibration.json'), model_independent=True)
+        summary.update(external_acquisition=external,imagery_seconds=duration,
+                       prepare_seconds=source_protocol.get('prepare_seconds'))
         result = dict(summary=summary, path=path, metadata=metadata)
         if arrays:
             with np.load(path/'calibration_raw.npz', allow_pickle=False) as values:
                 raw, labels, starts = values['eeg'].copy(), values['labels'].copy(), values['source_starts'].copy()
             expected = (source_protocol['trials'], len(metadata['channels']),
-                        round(metadata['sample_rate']*protocol['imagery_seconds']))
+                        raw_count)
             if (raw.shape != expected or labels.shape != (len(raw),) or starts.shape != labels.shape
                     or not np.issubdtype(labels.dtype, np.integer) or not np.issubdtype(starts.dtype,np.integer)
                     or np.any(starts<0) or not np.isfinite(raw).all()
