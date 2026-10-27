@@ -401,10 +401,17 @@ class ContinuousController(OnlineController):
                     "model": "无需模型；概率由演示程序生成"}
         details = super().model_details(participant, model_id)
         details["classes"] = self.display_classes(details["classes"])
+        if details.get('saved_calibration_ready'):
+            details.update(requires_prompted_calibration=False,
+                input_note='909次重训模型已恢复配套20轮EA与脚舌校准参数，无需原始脑电重新拟合。',
+                calibration_history=[],unavailable_calibrations=[],previous_calibration=None)
+            return details
         if details.get('embedded_calibration_ready'):
             details.update(requires_prompted_calibration=False,
                 input_note='ONNX已包含经输出层核对的校准偏置；按准备提示对齐2秒窗口，直接使用内置校准。',
                 calibration_history=[],unavailable_calibrations=[],previous_calibration=None)
+            if details.get('calibration_method')=='embedded_retrained_six_calibration_v1':
+                details['input_note']='ONNX已包含双IFNet、三个2秒窗、脚舌路由及20轮校准参数，直接使用完整模型。'
             return details
         if details.get('runtime')=='mi_studio_v2':
             details.update(input_note='v2按准备提示对齐2秒窗口；专用校准头已载入，实时预测不使用目标标签。',
@@ -435,7 +442,7 @@ class ContinuousController(OnlineController):
         ordered = {c['id']: list(ACTION_CHANNELS)[i] for i, c in enumerate(sorted(result, key=lambda c: c['id']))} if 2 <= len(result) <= 6 else {}
         for i, c in enumerate(result):
             key = hand_actions[i] if hand_actions is not None else c.get("hand_action", c.get("action"))
-            if hand_actions is None and len(result) == 6 and c['name'] in ('双脚', '舌头'):
+            if hand_actions is None and not c.get('hand_action') and len(result) == 6 and c['name'] in ('双脚', '舌头'):
                 key = {'双脚':'pinch', '舌头':'little'}[c['name']]
             if key not in ACTION_CHANNELS and 2 <= len(result) <= 6:
                 key = ordered[c['id']]
@@ -533,7 +540,11 @@ class ContinuousController(OnlineController):
                 needs_calibration=False
             if selection.get('embedded_calibration_ready'):
                 if request.get('session_purpose')=='calibration' or (request.get('calibration_mode')=='reuse' and request.get('calibration_source')):
-                    raise ValueError('此ONNX已内置校准偏置；若需重新校准，请选择对应的源模型。')
+                    raise ValueError('此ONNX已内置校准参数；若需重新校准，请选择对应的源模型。')
+                needs_calibration=False
+            if selection.get('saved_calibration_ready'):
+                if request.get('session_purpose')=='calibration' or (request.get('calibration_mode')=='reuse' and request.get('calibration_source')):
+                    raise ValueError('此条目已恢复20轮校准参数；若需重新校准，请选择未绑定参数的原模型。')
                 needs_calibration=False
             if needs_calibration:
                 from .shared_calibration import SharedCalibrationStore, imported_protocol
@@ -592,8 +603,8 @@ class ContinuousController(OnlineController):
             from .model_bundle import ONNXDecoder
             ONNXDecoder(selection['model'], prediction_stride_seconds=cfg['window']['stride_seconds'])
         elif selection.get('runtime')=='retrained_six':
-            from .retrained_runtime import load_portable
-            load_portable(selection['model'],selection['sha256'])
+            from .retrained_runtime import decoder_from_selection
+            decoder_from_selection(selection,cfg)
         elif selection.get('runtime')=='mi_studio_v2':
             from .studio_v2_runtime import StudioV2Decoder
             StudioV2Decoder(selection['model'],cfg,selection['sha256'])
@@ -1207,8 +1218,8 @@ class ContinuousController(OnlineController):
             from .model_bundle import ONNXDecoder
             decoder = ONNXDecoder(selection['model'], prediction_stride_seconds=cfg['window']['stride_seconds'])
         elif selection.get('runtime')=='retrained_six':
-            from .retrained_runtime import RetrainedStreamDecoder
-            decoder=RetrainedStreamDecoder(selection['model'],cfg,selection['sha256'])
+            from .retrained_runtime import decoder_from_selection
+            decoder=decoder_from_selection(selection,cfg)
         else:
             payload, model = load_model(selection["model"], "cpu")
             payload = dict(payload, config=copy.deepcopy(payload['config']))

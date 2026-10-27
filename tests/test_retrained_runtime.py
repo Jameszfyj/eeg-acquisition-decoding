@@ -2,6 +2,7 @@
 import base64
 import copy
 import io
+import json
 import tempfile
 from pathlib import Path
 import unittest
@@ -12,10 +13,11 @@ import torch
 
 from handbci.config import load_config
 from handbci.model import IFNetClassifier
-from handbci.four_class_online import CHANNELS,SCALP
+from handbci.four_class_online import CHANNELS,SCALP,digest
 from handbci.six_class_online import ARCH,NAMES
 from handbci.six_class_retrained import FORMAT
-from handbci.retrained_runtime import RetrainedStreamDecoder,task_windows,CALIBRATION_METHOD
+from handbci.retrained_runtime import (RetrainedStreamDecoder,task_windows,CALIBRATION_METHOD,
+                                      register_model,decoder_from_selection)
 from handbci.continuous_online import ContinuousController
 from handbci.shared_calibration import ImportedCalibrationDecoder
 from handbci.subject_online import prepare_subject_model
@@ -100,6 +102,54 @@ class RetrainedRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);path=root/'model.pt';torch.save(payload,path)
             with self.assertRaises(ValueError):RetrainedStreamDecoder(path,cfg)
+
+    def test_saved_parameters_restore_without_raw_data_or_refitting(self):
+        payload,cfg=fixture()
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);path=root/'model.pt';calibration=root/'calibration.npz';registry=root/'registry.json'
+            torch.save(payload,path)
+            metadata=dict(method='ea_only',model_sha256=digest(path),rounds=20,n_tasks=120)
+            np.savez_compressed(calibration,metadata=np.asarray(json.dumps(metadata)),alignment=np.eye(30))
+            original=register_model('P01',path,registry)
+            ready=register_model('P01',path,registry,calibration_path=calibration)
+            self.assertNotEqual(original['model_id'],ready['model_id'])
+            selection,cfg=prepare_subject_model('P01',ready['model_id'],registry=registry)
+            self.assertTrue(selection['saved_calibration_ready'])
+            self.assertFalse(selection['requires_calibration'])
+            self.assertEqual([c['hand_action'] for c in cfg['classes']],['index','ring','thumb','little','pinch','middle'])
+            controller=ContinuousController(root/'runs',registry=registry)
+            request=dict(participant='P01',model_id=ready['model_id'],mode='acp',host='127.0.0.1',port=4097,
+                         prompted=dict(enabled=True),output=dict(mode='simulation'))
+            prepared=controller.prepare(request)[0]
+            self.assertNotIn('imported_calibration',prepared)
+            self.assertFalse(controller.model_details('P01',ready['model_id'])['requires_prompted_calibration'])
+            decoder=decoder_from_selection(selection,cfg)
+            raw=np.random.default_rng(3).normal(size=(32,5000)).astype(np.float32)
+            result=decoder.process(raw,np.arange(5000))
+            self.assertIsNotNone(result)
+            self.assertAlmostEqual(float(result[1].sum()),1.,places=6)
+            self.assertEqual(decoder.last_details['selected_head'],'ea_only')
+            request['session_purpose']='calibration'
+            with self.assertRaisesRegex(ValueError,'已恢复20轮'):
+                controller.prepare(request)
+            calibration.write_bytes(calibration.read_bytes()+b'changed')
+            with self.assertRaisesRegex(ValueError,'发生变化'):
+                prepare_subject_model('P01',ready['model_id'],registry=registry)
+            with self.assertRaisesRegex(ValueError,'校验失败'):
+                decoder_from_selection(selection,cfg)
+            uncalibrated,_=prepare_subject_model('P01',original['model_id'],registry=registry)
+            self.assertTrue(uncalibrated['requires_calibration'])
+
+    def test_mismatched_saved_parameters_do_not_register_model(self):
+        payload,_=fixture()
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);path=root/'model.pt';calibration=root/'calibration.npz';registry=root/'registry.json'
+            torch.save(payload,path)
+            np.savez_compressed(calibration,metadata=np.asarray(json.dumps(dict(method='ea_only',n_tasks=120,
+                model_sha256='0'*64))),alignment=np.eye(30))
+            with self.assertRaisesRegex(ValueError,'不属于'):
+                register_model('P01',path,registry,calibration_path=calibration)
+            self.assertFalse(registry.exists())
 
 
 if __name__=='__main__':unittest.main()

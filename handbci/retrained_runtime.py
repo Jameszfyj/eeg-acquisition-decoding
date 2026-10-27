@@ -34,7 +34,7 @@ def load_portable(path,expected_sha256=None):
     return model,cfg
 
 
-def register_model(participant,path,registry,name=None):
+def register_model(participant,path,registry,name=None,*,calibration_path=None):
     from .subject_online import ROOT, read_registry
     model,cfg=load_portable(path)
     if participant!='P01':raise ValueError('新六分类权重属于P01。')
@@ -44,6 +44,15 @@ def register_model(participant,path,registry,name=None):
     entry=dict(participant_id=participant,model_id='P01_retrained_'+model.sha256[:12],
         name=name or 'P01 · 909次重训＋20轮脚舌校准',path=stored,sha256=model.sha256,
         runtime=RUNTIME,source='neuracle_acp',n_channels=30,n_classes=6)
+    if calibration_path is not None:
+        calibration_path=Path(calibration_path).resolve()
+        model.restore_calibration(calibration_path)
+        calibration_sha=digest(calibration_path)
+        try:calibration_stored=calibration_path.relative_to(ROOT).as_posix()
+        except ValueError:calibration_stored=str(calibration_path)
+        entry.update(model_id=entry['model_id']+'_cal_'+calibration_sha[:8],
+            name=name or 'P01 · 909次重训 · 20轮校准已恢复',
+            calibration_path=calibration_stored,calibration_sha256=calibration_sha)
     catalog=read_registry(registry)
     for current in catalog['models']:
         if current['model_id']==entry['model_id']:return current
@@ -64,6 +73,20 @@ def prepare_entry(entry,path):
         n_channels=30,n_classes=6,sample_rate=1000.,driver='mock',physical_action=False,
         requires_calibration=True,calibration_method=CALIBRATION_METHOD,
         offline_prototype_only=True,online_control_validated=False)
+    if entry.get('calibration_path'):
+        from .subject_online import resolve_path
+        calibration_path=resolve_path(entry['calibration_path'])
+        if digest(calibration_path)!=entry.get('calibration_sha256'):
+            raise ValueError('配套20轮校准参数发生变化，请核对后重新登记。')
+        model.restore_calibration(calibration_path)
+        selection.update(requires_calibration=False,saved_calibration_ready=True,
+            saved_calibration_path=str(calibration_path),saved_calibration_sha256=entry['calibration_sha256'],
+            saved_calibration_method=model.calibration['method'],
+            calibration_rounds=20,calibration_trials=120)
+        # These are the published P01 gesture mappings in this model's original
+        # output order. An explicit page selection can still override them.
+        for c,action in zip(cfg['classes'],('index','ring','thumb','little','pinch','middle')):
+            c['hand_action']=action
     return selection,cfg
 
 
@@ -90,8 +113,12 @@ def task_windows(raw,starts,cfg):
 class RetrainedStreamDecoder:
     required_calibration_seconds=3.9
 
-    def __init__(self,path,cfg,expected_sha256=None):
+    def __init__(self,path,cfg,expected_sha256=None,*,calibration_path=None,calibration_sha256=None):
         self.predictor,_=load_portable(path,expected_sha256)
+        if calibration_path is not None:
+            if calibration_sha256 is None or digest(calibration_path)!=calibration_sha256:
+                raise ValueError('配套20轮校准参数校验失败。')
+            self.predictor.restore_calibration(calibration_path)
         self.cfg=cfg;self.stream=StreamPreprocessor(cfg)
         self.notch=signal.iirnotch(50.,30.,fs=250.)
         self.recover_stream(0,'initial')
@@ -133,3 +160,24 @@ class RetrainedStreamDecoder:
 
     def save_model_calibration(self,path):
         self.predictor.save_calibration(path)
+
+
+def decoder_from_selection(selection,cfg):
+    return RetrainedStreamDecoder(selection['model'],cfg,selection['sha256'],
+        calibration_path=selection.get('saved_calibration_path'),
+        calibration_sha256=selection.get('saved_calibration_sha256'))
+
+
+def main():
+    import argparse
+    from .subject_online import DEFAULT_REGISTRY
+    parser=argparse.ArgumentParser(description='登记909次重训模型及可选的已拟合20轮校准参数')
+    parser.add_argument('--model',type=Path,required=True)
+    parser.add_argument('--calibration',type=Path)
+    parser.add_argument('--registry',type=Path,default=DEFAULT_REGISTRY)
+    args=parser.parse_args()
+    entry=register_model('P01',args.model,args.registry,calibration_path=args.calibration)
+    print('已登记：'+entry['name']+'\n模型编号：'+entry['model_id'])
+
+
+if __name__=='__main__':main()

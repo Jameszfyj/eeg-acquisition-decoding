@@ -20,7 +20,7 @@ def validate_participant_id(value: str) -> str:
     return participant
 
 
-def validate_config(config: dict) -> dict:
+def validate_config(config: dict, *, require_ifnet_patches: bool = True) -> dict:
     cfg = copy.deepcopy(config)
     device, prep, window = cfg["device"], cfg["preprocess"], cfg["window"]
     channels = device["channels"]
@@ -42,7 +42,7 @@ def validate_config(config: dict) -> dict:
         raise ValueError("开头剔除时长不能为负。")
     n = round(float(window["seconds"]) * out_fs)
     patch = round(0.5 * out_fs)
-    if n < max(64, patch) or n % patch:
+    if n < max(64, patch) or (require_ifnet_patches and n % patch):
         raise ValueError("IFNet窗口须足够长，且为0.5秒的整数倍。")
     if float(window["stride_seconds"]) <= 0 or float(window["task_offset_seconds"]) < 0:
         raise ValueError("切窗步长必须为正，任务起点偏移不能为负。")

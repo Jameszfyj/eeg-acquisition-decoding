@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import math
+import re
 from pathlib import Path
 import shutil
 import time
@@ -23,6 +24,48 @@ MAX_UPLOAD = 32 * 1024 * 1024
 MAX_MODEL = 128 * 1024 * 1024
 ROOT = Path(__file__).resolve().parents[1]
 PREPARE_PROFILE = 'l100d250h4_pre_v2'
+RETRAINED_ONNX_FORMAT = 'handbci.retrained_six_onnx.v1'
+
+
+def retrained_embedded_calibration(manifest,model_data):
+    deployment=manifest.get('deployment',{})
+    if not isinstance(deployment,dict) or deployment.get('format')!=RETRAINED_ONNX_FORMAT:
+        return None
+    from .four_class_online import CHANNELS,SCALP
+    from .six_class_online import NAMES
+    cfg=manifest['config'];calibration=deployment.get('calibration',{})
+    if (cfg['device']['sample_rate']!=1000 or cfg['device']['unit']!='uV'
+            or cfg['device']['channels']!=CHANNELS or cfg['device']['source']!='neuracle_acp'
+            or manifest['participant_id']!='P01'
+            or [c['name'] for c in cfg['classes']]!=NAMES
+            or manifest['input']['pipeline']!='fir' or manifest['input'].get('normalization') is not None
+            or manifest['input']['channels']!=[CHANNELS[i] for i in SCALP]
+            or manifest['output']['kind']!='probabilities' or cfg['window']['seconds']!=2.8
+            or deployment.get('window_samples')!=700 or deployment.get('window_offsets_samples')!=[0,100,200]
+            or deployment.get('subwindow_samples')!=500
+            or cfg['preprocess']!=dict(output_rate=250.,lowpass_hz=100.,highpass_hz=4.,numtaps=201,trim_seconds=1.)
+            or not isinstance(calibration,dict) or calibration.get('rounds')!=20
+            or calibration.get('trials')!=120 or calibration.get('method') not in ('ea_only','head_ridge10','head_ridge1')):
+        raise ValueError('双IFNet ONNX的三窗、输入或20轮校准约定不匹配。')
+    if any(not isinstance(calibration.get(k),str) or not re.fullmatch(r'[0-9a-f]{64}',calibration[k])
+           for k in ('model_sha256','parameters_sha256','alignment_sha256')):
+        raise ValueError('双IFNet ONNX缺少模型和校准参数的校验值。')
+    import onnx
+    from onnx import numpy_helper
+    graph=onnx.load_model_from_string(model_data)
+    metadata={item.key:item.value for item in graph.metadata_props}
+    try:recorded=json.loads(metadata['handbci.retrained_calibration'])
+    except (KeyError,TypeError,ValueError):
+        raise ValueError('双IFNet ONNX图中缺少配套校准声明。') from None
+    if recorded!=calibration:
+        raise ValueError('双IFNet ONNX的图与清单校准声明不一致。')
+    values=[numpy_helper.to_array(item) for item in graph.graph.initializer if item.name=='alignment']
+    if len(values)!=1 or values[0].shape!=(30,30) or not np.isfinite(values[0]).all():
+        raise ValueError('双IFNet ONNX缺少内置EA对齐矩阵。')
+    digest=hashlib.sha256(np.ascontiguousarray(values[0],dtype='<f8').tobytes()).hexdigest()
+    if digest!=calibration['alignment_sha256']:
+        raise ValueError('双IFNet ONNX内置EA参数校验失败。')
+    return copy.deepcopy(calibration)
 
 
 def native_prepare_contract(manifest):
@@ -46,6 +89,9 @@ def native_prepare_contract(manifest):
 
 def embedded_calibration(manifest, model_data):
     """Recognize the declared native bias only when it is the graph's final Add."""
+    retrained=retrained_embedded_calibration(manifest,model_data)
+    if retrained is not None:
+        return retrained
     if not native_prepare_contract(manifest):
         return None
     calibration = manifest['config']['session_metadata'].get('calibration')
@@ -85,7 +131,7 @@ def validate_manifest(value):
         raise ValueError('模型包格式须为 handbci.onnx.v1。')
     m = copy.deepcopy(value)
     owner = validate_participant_id(m.get('participant_id', ''))
-    cfg = validate_config(m['config'])
+    cfg = validate_config(m['config'],require_ifnet_patches=m['input'].get('pipeline')=='ifnet_filterbank')
     if not 2 <= len(cfg['classes']) <= 6:
         raise ValueError('实时界面支持2至6类模型。')
     if cfg['device']['source'] not in ('neuracle_acp', 'synthetic_tcp'):
@@ -331,7 +377,11 @@ def prepare_entry(entry, folder):
     if calibration is not None:
         selection.update(embedded_calibration_ready=True,requires_calibration=False,
             calibration_method='embedded_native_logit_bias_v1',
-            embedded_calibration_trials=calibration['trials'],embedded_calibration_sessions=calibration['sessions'])
+            embedded_calibration_trials=calibration['trials'],
+            embedded_calibration_sessions=calibration.get('sessions',[calibration.get('source_session_id')]))
+        if m.get('deployment',{}).get('format')==RETRAINED_ONNX_FORMAT:
+            selection.update(calibration_method='embedded_retrained_six_calibration_v1',
+                native_platform_ifnet=True,preprocessing_profile='retrained_six_three_windows_fir_v1')
     from .workbench_settings import model_preferences
     stride = model_preferences(entry['model_id']).get('prediction_stride_seconds')
     if stride is not None:
