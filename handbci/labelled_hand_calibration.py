@@ -7,18 +7,20 @@ from scipy.special import expit
 PAIRS=((0,2),(1,3))
 
 
-def validate_labels(labels):
+def validate_labels(labels, rounds=3):
     raw=np.asarray(labels)
-    if (raw.shape!=(18,) or not np.issubdtype(raw.dtype,np.integer)
-            or np.any(raw<0) or np.any(raw>5) or np.bincount(raw,minlength=6).tolist()!=[3]*6):
-        raise ValueError('有标签校准需要18次完整提示任务，每类3次。')
+    if (isinstance(rounds, bool) or not isinstance(rounds, int) or not 1 <= rounds <= 100):
+        raise ValueError('有标签校准轮数无效。')
+    if (raw.shape!=(rounds*6,) or not np.issubdtype(raw.dtype,np.integer)
+            or np.any(raw<0) or np.any(raw>5) or np.bincount(raw,minlength=6).tolist()!=[rounds]*6):
+        raise ValueError(f'有标签校准需要{rounds*6}次完整提示任务，每类{rounds}次。')
     return raw.astype(np.int64)
 
 
-def fit_hand_bias(probabilities,labels):
-    labels=validate_labels(labels)
+def fit_hand_bias(probabilities,labels,rounds=3):
+    labels=validate_labels(labels,rounds=rounds)
     p=np.asarray(probabilities)
-    if p.shape!=(18,6) or not np.isfinite(p).all() or np.any(p<0) or not np.allclose(p.sum(1),1.,atol=1e-5):
+    if p.shape!=(len(labels),6) or not np.isfinite(p).all() or np.any(p<0) or not np.allclose(p.sum(1),1.,atol=1e-5):
         raise ValueError('有标签校准的任务概率无效。')
     biases=[]
     for fist,rotation in PAIRS:

@@ -16,6 +16,7 @@ from scipy import signal
 
 from .four_class_online import CHANNELS, SCALP, digest
 from .preprocess import StreamPreprocessor
+from .workbench_settings import calibration_protocol
 from .six_class_online import (ARCH, NAMES, LIMITS, IMPROVED_MODEL, IMPROVED_SHA256,
                               LABELLED_MODEL, LABELLED_SHA256)
 
@@ -72,16 +73,17 @@ def band_windows(values, bands):
         output='sos'), values, axis=-1).astype(np.float32) for b in bands], axis=1)
 
 
-def fit_alignment(values):
-    """Exactly the saved candidate's 18-trial, three-window unlabeled EA fit."""
+def fit_alignment(values, *, n_trials=18):
+    """Original three-window EA estimator, with an explicit complete trial count."""
     values = np.asarray(values)
-    if values.shape != (54, 30, 500) or not np.isfinite(values).all():
-        raise ValueError('校准需要18次完整任务、每次3个窗口，不能用缺失或后续数据补齐。')
+    if (isinstance(n_trials, bool) or not isinstance(n_trials, int) or not 6 <= n_trials <= 600
+            or n_trials % 6 or values.shape != (n_trials*3, 30, 500) or not np.isfinite(values).all()):
+        raise ValueError(f'校准需要{n_trials}次完整任务、每次3个窗口，不能用缺失或后续数据补齐。')
     filtered = signal.sosfiltfilt(signal.butter(4, [4., 40.], btype='bandpass',
         fs=250., output='sos'), values, axis=-1)
     centered = filtered-filtered.mean(-1, keepdims=True)
     cov = centered@centered.swapaxes(-1, -2)/499
-    mean = cov.reshape(18, 3, 30, 30).mean(1).mean(0)
+    mean = cov.reshape(n_trials, 3, 30, 30).mean(1).mean(0)
     shrunk = .9*mean+.1*np.trace(mean)/30*np.eye(30)
     eig, vectors = np.linalg.eigh(shrunk)
     if eig.min() <= 0:
@@ -90,7 +92,7 @@ def fit_alignment(values):
     error = float(abs(alignment@shrunk@alignment.T-np.eye(30)).max())
     if error >= 1e-8:
         raise ValueError('校准矩阵核验失败。')
-    return alignment, dict(n_trials=18, n_overlapping_windows=54, labels_used=False,
+    return alignment, dict(n_trials=n_trials, n_overlapping_windows=n_trials*3, labels_used=False,
         identity_max_error=error, condition_number=float(eig.max()/eig.min()))
 
 
@@ -98,13 +100,18 @@ class ImprovedSixClassDecoder:
     def __init__(self, payload, models, cfg):
         self.payload, self.models = payload, models
         self.stream = StreamPreprocessor(cfg)
+        self.protocol = calibration_protocol(cfg)
+        self.rounds = self.protocol['rounds']
+        self.total = self.protocol['trials']
+        self.imagery_seconds = self.protocol['imagery_seconds']
+        self.rest_seconds = self.protocol['rest_seconds']
         self.lock = threading.RLock()
         self.notch = signal.iirnotch(50., 30., fs=250.)
         self.history = np.empty((30, 0), np.float32)
         self.indices = np.empty(0, np.int64)
         self.latest_index, self.last_prediction = -1, -float('inf')
         rng = np.random.default_rng(42)
-        self.tasks = np.concatenate([rng.permutation(6) for _ in range(3)]).tolist()
+        self.tasks = np.concatenate([rng.permutation(6) for _ in range(self.rounds)]).tolist()
         self.completed, self.windows, self.events = 0, [], []
         self.alignment, self.calibration_info = None, None
         self.phase, self.prompt_id = 'warming', None
@@ -147,7 +154,7 @@ class ImprovedSixClassDecoder:
             restored_bias = None
             if self.hand_supervised:
                 from .labelled_hand_calibration import validate_labels
-                labels = validate_labels(saved.get('task_labels'))
+                labels = validate_labels(saved.get('task_labels'), rounds=self.rounds)
                 restored_bias = self._hand_bias_from(saved['windows'],labels)
                 if not np.allclose(restored_bias,saved.get('hand_bias'),rtol=1e-9,atol=1e-10):
                     raise ValueError('上次有标签动作校准核验失败，请重新校准。')
@@ -158,16 +165,17 @@ class ImprovedSixClassDecoder:
                 self.tasks = labels.tolist()
                 self.hand_bias = restored_bias
             self.reused_from = copy.deepcopy(saved['summary'])
-            self.completed, self.phase, self.audio_enabled = 18, 'complete', False
+            self.completed, self.phase, self.audio_enabled = self.total, 'complete', False
             self.events.append(dict(kind='calibration_reused', source=saved['summary'],
                                     physical_event_time_verified=False))
 
     def snapshot_calibration(self):
         with self.lock:
             done = self.alignment is not None and (not self.hand_supervised or self.hand_bias is not None)
-            label = self.tasks[min(self.completed, 17)]
-            return dict(required=True, completed=self.completed, total=18,
-                round=min(self.completed//6+1, 3), trial=min(self.completed+1, 18),
+            label = self.tasks[min(self.completed, self.total-1)]
+            return dict(required=True, completed=self.completed, total=self.total,
+                rounds=self.rounds, imagery_seconds=self.imagery_seconds, rest_seconds=self.rest_seconds,
+                round=min(self.completed//6+1, self.rounds), trial=min(self.completed+1, self.total),
                 phase=self.phase, ready=done, task=NAMES[label],
                 remaining_seconds=self.remaining, prompt_id=self.prompt_id,
                 awaiting_display=self.prompt_id is not None and self.started_index is None,
@@ -185,7 +193,7 @@ class ImprovedSixClassDecoder:
         self.phase, self.started_index = phase, None
         self.prompt_id = uuid.uuid4().hex
         self.prompt_created = time.monotonic()
-        self.remaining = 4. if phase == 'imagery' else 3.
+        self.remaining = self.imagery_seconds if phase == 'imagery' else self.rest_seconds
 
     def acknowledge(self, prompt_id, session_id, audio=None):
         with self.lock:
@@ -227,7 +235,7 @@ class ImprovedSixClassDecoder:
                 raise ValueError('校准窗口不完整，已停止。')
             # The 1 s causal FIR support must remain within the imagery period.
             if (self.indices[start]-1000 < self.started_index
-                    or self.indices[start+499] >= self.started_index+4000):
+                    or self.indices[start+499] >= self.started_index+self.imagery_seconds*self.stream.fs):
                 raise ValueError('校准滤波支持超出任务边界。')
             result.append(self.history[:, start:start+500])
         return self._notched(np.stack(result))
@@ -242,7 +250,7 @@ class ImprovedSixClassDecoder:
             if time.monotonic()-self.prompt_created > timeout:
                 raise RuntimeError(f'校准提示超过{timeout}秒未收到页面显示回执或语音完成回执，已停止，请保持页面可见。')
             return
-        duration = 4. if self.phase == 'imagery' else 3.
+        duration = self.imagery_seconds if self.phase == 'imagery' else self.rest_seconds
         self.remaining = max(0., duration-(self.latest_index+1-self.started_index)/self.stream.fs)
         if self.remaining > 0:
             return
@@ -253,10 +261,10 @@ class ImprovedSixClassDecoder:
         self.events.append(dict(kind='task_end', trial=self.completed+1,
             source_index=self.latest_index+1, physical_event_time_verified=False))
         self.completed += 1
-        if self.completed < 18:
+        if self.completed < self.total:
             self._prompt('rest')
         else:
-            self.alignment, self.calibration_info = fit_alignment(np.stack(self.windows))
+            self.alignment, self.calibration_info = fit_alignment(np.stack(self.windows), n_trials=self.total)
             self._finish_hand_calibration()
             self.phase, self.prompt_id, self.remaining = 'complete', None, 0.
             self.history = self.history[:, :0]
@@ -272,8 +280,10 @@ class ImprovedSixClassDecoder:
         from .labelled_hand_calibration import fit_hand_bias
         values = band_windows(np.asarray(windows), [[4.,16.],[16.,40.]])
         with torch.inference_mode():
-            p = self.models['baseline'](torch.from_numpy(values)).softmax(1).cpu().numpy().reshape(18,3,6).mean(1)
-        return fit_hand_bias(p,tasks)
+            batches = [self.models['baseline'](torch.from_numpy(values[start:start+54])).softmax(1).cpu().numpy()
+                       for start in range(0, len(values), 54)]
+            p = np.concatenate(batches).reshape(self.total,3,6).mean(1)
+        return fit_hand_bias(p,tasks,rounds=self.rounds)
 
     def _infer(self, key, values):
         import torch
@@ -312,8 +322,9 @@ class ImprovedSixClassDecoder:
         with self.lock:
             values, retained = self.stream.process(raw, indices)
             self.latest_index = int(indices[-1])
-            self.history = np.concatenate((self.history, values[SCALP]), axis=1)[:, -2000:]
-            self.indices = np.concatenate((self.indices, retained))[-2000:]
+            keep = max(2000, int((self.imagery_seconds+2)*self.stream.output_fs))
+            self.history = np.concatenate((self.history, values[SCALP]), axis=1)[:, -keep:]
+            self.indices = np.concatenate((self.indices, retained))[-keep:]
             if self.alignment is None:
                 self._calibrate_step()
                 return None
@@ -331,6 +342,7 @@ class ImprovedSixClassDecoder:
         with self.lock:
             complete = self.alignment is not None and (not self.hand_supervised or self.hand_bias is not None)
             metadata = dict(state=self.snapshot_calibration(), events=copy.deepcopy(self.events),
+                protocol=self.protocol,
                 info=self.calibration_info, complete=complete,
                 labels_used=self.hand_supervised, physical_event_time_verified=False,
                 timing_source='reused_calibration' if self.reused_from else 'browser_render_ack_at_latest_received_source_index',

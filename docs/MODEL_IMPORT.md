@@ -66,3 +66,27 @@ python -m handbci.model_bundle --manifest manifest.json --model model.onnx --out
 在网页填写模型内部被试编号并上传ZIP。上传后会检查图、输入和一次试运行输出，计算校验值并登记在本机`configs/subject_models.json`；模型文件放在`runtime/models/imported/`。修改模型或清单后需重新导入。模型检查通过只证明接口可运行，不证明分类准确率。
 
 原三轮校准属于本项目特定的IFNet与复判方案，不会自动套到任意ONNX模型。需要校准的外部模型应先完成自己的校准并导出对应模型，或扩展适配器。
+
+## 本机默认设置
+
+可在 `configs/workbench.local.json` 保存本机偏好。该文件、`local/`、`Conf/`、运行数据和环境均被Git忽略。模型仍需先导入或接入对应研究适配器；偏好不会替代模型和来源检查。
+
+```json
+{
+  "format": "handbci.workbench.local.v1",
+  "port": 57474,
+  "default_model_id": "替换为已登记的模型编号",
+  "models": {
+    "替换为已登记的模型编号": {
+      "hand_actions": ["index", "ring", "thumb", "little", "pinch", "middle"],
+      "ui_defaults": {"decisionMode": "vote", "voteWindow": 2, "voteRatio": 0.65}
+    }
+  }
+}
+```
+
+`hand_actions`按模型类别顺序填写，数量必须与类别数一致。默认设置仅在打开或切换模型时应用；打开页面不会启动采集或动作。
+
+原六组有标签研究适配器额外支持 `calibration: {"rounds": 20, "imagery_seconds": 6, "rest_seconds": 3}`。每轮包含全部6类，因此20轮为120次任务。改变轮数不会重训或修改原始权重；EA及动作偏置按完整的新任务集合拟合。原来的每任务3个2秒窗口及其起始偏移0.6/1.0/1.4秒保持不变，想象提示会持续指定的全部时间。历史校准只有轮数、时长和输入约定一致时才能复用。
+
+研究适配器可通过本机设置中的 `research_data_root` 指向原始六组实验目录，`labelled_checkpoint` 指向原有有标签权重，`hand_calibration` 指向已核对的机械手姿态JSON；相对路径按仓库目录解析。该入口继续校验原始模型与训练来源，依赖对应的原始文件，不会随公开仓库提供。

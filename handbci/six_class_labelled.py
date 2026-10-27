@@ -3,10 +3,16 @@ from __future__ import annotations
 import copy,json
 from .four_class_online import CHANNELS,digest
 from .six_class_online import (BATCH,NAMES,LIMITS,LABELLED_ID,LABELLED_MODEL,LABELLED_SHA256)
+from .workbench_settings import model_preferences, calibration_protocol
 
 PLAN=BATCH/'六组联合训练_20261024/experiment_plan.json'
 PLAN_SHA256='1e5609d7ba720443f7b4d8072a88b3a29a2b9ab94f7ce79cadc0a3d784f7cdda'
-TITLE='六组模型 · 3轮有标签校准（实验）'
+def protocol():
+    return calibration_protocol({'session_metadata': {'brain_calibration':
+        model_preferences(LABELLED_ID).get('calibration', {})}})
+
+
+TITLE=f"六组模型 · {protocol()['rounds']}轮有标签校准（实验）"
 
 
 def prepare(participant):
@@ -35,10 +41,14 @@ def prepare(participant):
     cfg['session_metadata']=dict(participant_id='P01',presentation='continuous_six_class_observation',
         unprompted=False,calibration_required=True,calibration_timing='browser_render_ack_to_received_source_index; not hardware verified',
         source_quality=[m['quality'] for m in metadata],hand_supervised_calibration=True,**LIMITS)
+    online_protocol=protocol()
+    cfg['session_metadata']['brain_calibration']=online_protocol
     selection=dict(participant_id='P01',model_id=LABELLED_ID,name=TITLE,source='p01_six_acp_observation',
         model=str(LABELLED_MODEL),sha256=LABELLED_SHA256,plan_sha256=PLAN_SHA256,
         requires_calibration=True,hand_supervised_calibration=True,calibration_labels_used=True,
-        calibration_trials=18,calibration_rounds=3,experimental=True,synthetic_model=False,
+        calibration_trials=online_protocol['trials'],calibration_rounds=online_protocol['rounds'],
+        calibration_imagery_seconds=online_protocol['imagery_seconds'],
+        calibration_rest_seconds=online_protocol['rest_seconds'],experimental=True,synthetic_model=False,
         n_classes=6,n_channels=30,sample_rate=1000.,driver='mock',physical_action=False,
         independent_test_of_this_refit=False,input_note=cfg['description'],
         probability_semantics='conditional within original inferred hand side after labeled bias; original feet/tongue expert conditional',**LIMITS)

@@ -33,6 +33,7 @@ from .hand_test import ManualHandTest
 from .action_records import build_class_evidence, instruction_evidence, actual_evidence
 from .speech import SpeechCache
 from .waveform_preview import WaveformPreview
+from .workbench_settings import local_settings, local_path, model_preferences
 
 ROOT = Path(__file__).resolve().parents[1]
 DEMO_ID = "probability-demo-v1"
@@ -339,15 +340,17 @@ class ContinuousController(OnlineController):
     def models(self):
         from .four_class_online import catalog
         from .six_class_online import catalog as six_catalog
-        return [{"participant_id": "DEMO", "model_id": DEMO_ID,
+        items = [{"participant_id": "DEMO", "model_id": DEMO_ID,
                  "name": "六类交互演示 · 无脑电 / 无模型", "n_classes": 6,
                  "source": "probability_demo"}] + super().models() + catalog() + six_catalog()
+        preferred = local_settings().get('default_model_id')
+        return [dict(item, is_default=item['model_id'] == preferred) for item in items]
 
     def model_details(self, participant, model_id):
         details = self._model_details(participant, model_id)
         from .six_class_online import SIX_MODEL_IDS
         calibration = calibration_defaults()
-        saved_path = ROOT/'configs/hand_calibration_P01_20261024.json'
+        saved_path = local_path('hand_calibration', ROOT/'configs/hand_calibration_P01_20261024.json')
         if participant == 'P01' and model_id in SIX_MODEL_IDS and saved_path.is_file():
             saved = json.loads(saved_path.read_text(encoding='utf-8-sig'))
             if (saved.get('participant_id') == participant
@@ -360,6 +363,13 @@ class ContinuousController(OnlineController):
                        hand_calibration=calibration)
         if participant == 'P01' and model_id in SIX_MODEL_IDS:
             details['hand_mapping_revision'] = 'P01-feet-pinch-tongue-little-v1'
+        preferences = model_preferences(model_id)
+        mapping = preferences.get('hand_actions')
+        if mapping is not None:
+            details['classes'] = self.display_classes(details['classes'], hand_actions=mapping)
+            details['hand_mapping_revision'] = 'local:' + json.dumps(mapping, separators=(',', ':'))
+            details['hand_mapping_reset_all'] = True
+        details['ui_defaults'] = preferences.get('ui_defaults', {})
         return details
 
     def _model_details(self, participant, model_id):
@@ -448,7 +458,7 @@ class ContinuousController(OnlineController):
                 raise ValueError('实时测试使用ACP直连，默认4097；不使用厂家转发端口8712。')
             cfg['device'].update(host=host, port=int(port))
             classes = self.display_classes(cfg['classes'], request.get('actions') if mode == 'six' else None,
-                                           request.get('hand_actions') if mode == 'six' else None)
+                                           request.get('hand_actions', model_preferences(request['model_id']).get('hand_actions')) if mode == 'six' else None)
             if selection.get('requires_calibration'):
                 calibration_mode = request.get('calibration_mode', 'new')
                 if calibration_mode not in ('new', 'reuse'):
@@ -1530,7 +1540,7 @@ def open_existing_workbench(url, *, no_browser):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="六类脑电持续解码 · 网页模拟或真实机械手输出")
-    parser.add_argument("--port", type=int, default=57474)
+    parser.add_argument("--port", type=int, default=local_settings().get('port', 57474))
     parser.add_argument("--output", type=Path, default=ROOT/"runtime/continuous")
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     parser.add_argument("--no-browser", action="store_true")

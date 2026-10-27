@@ -33,3 +33,4 @@ local/
 *.whl
 configs/subject_models.json
 configs/channel_layouts.local.json
+configs/workbench.local.json

@@ -91,9 +91,9 @@
       <p class="field-note">每次只弯曲/捏合一次并返回，不停在弯曲位置。返回到位才算完成，之后才计算动作间隔；整个往返不接收排队动作。投票模式允许重新识别并连续执行相同动作。停止或故障时尽力保持当前位置，不继续执行自动返回。旧缓存中的“保持姿态/返回基准”设置不再用于六动作，位置和速度等校准值保留。网页也只演示一次往返，示意耗时不代表实物耗时。</p>
     </details>
     <section id="brainCalibration" class="panel brain-calibration" hidden aria-label="改进模型脑电校准">
-      <div class="calibration-heading"><h2>脑电校准</h2><span id="brainCalibrationCount">0 / 18</span></div>
-      <p id="brainCalibrationHint">3轮，每轮6类。按提示进行运动想象。</p>
-      <div id="calibrationChoice"><label class="field">本次校准<select id="brainCalibrationMode"><option value="reuse" disabled>使用已保存校准（正在读取）</option><option value="new" selected>重新校准</option></select></label><label id="savedCalibrationField" class="field" hidden>选择历史校准<select id="savedCalibration"><option value="">暂无完整记录</option></select></label><p id="brainCalibrationHistory" class="field-note" role="status"></p><p id="calibrationUnavailable" class="field-note"></p><p class="field-note">同一被试且脑电帽未摘下或调整时可复用完整18次校准。三个有标签实验模型可共用校准脑电，各自重算参数；重新戴帽或调整电极后请重新校准。</p></div>
+      <div class="calibration-heading"><h2>脑电校准</h2><span id="brainCalibrationCount">0 / —</span></div>
+      <p id="brainCalibrationHint">正在读取当前模型的校准设置…</p>
+      <div id="calibrationChoice"><label class="field">本次校准<select id="brainCalibrationMode"><option value="reuse" disabled>使用已保存校准（正在读取）</option><option value="new" selected>重新校准</option></select></label><label id="savedCalibrationField" class="field" hidden>选择历史校准<select id="savedCalibration"><option value="">暂无完整记录</option></select></label><p id="brainCalibrationHistory" class="field-note" role="status"></p><p id="calibrationUnavailable" class="field-note"></p><p class="field-note">同一被试且脑电帽未摘下或调整时，可复用轮数、时长和输入配置一致的完整校准；重新戴帽或调整电极后请重新校准。</p></div>
       <div id="calibrationAudioSettings" class="calibration-audio-settings"><label><input id="calibrationSound" type="checkbox" checked> 语音提示</label><button id="previewCalibrationAudio" class="button secondary">试听语音</button><span id="brainAudioStatus" role="status">开始前自动准备语音</span></div>
       <strong id="brainCalibrationTask" role="status" aria-live="polite">等待开始校准</strong>
       <div class="calibration-track"><i id="brainCalibrationProgress"></i></div>

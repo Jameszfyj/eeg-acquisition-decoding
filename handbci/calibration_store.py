@@ -12,13 +12,15 @@ from zipfile import BadZipFile
 import numpy as np
 
 from .four_class_online import digest
+from .workbench_settings import calibration_protocol
 
 
 def input_contract(cfg):
     device = cfg['device']
     return dict(channels=device['channels'], sample_rate=device['sample_rate'],
                 unit=device['unit'], reference=device.get('reference'),
-                preprocess=cfg['preprocess'], window_seconds=cfg['window']['seconds'])
+                preprocess=cfg['preprocess'], window_seconds=cfg['window']['seconds'],
+                calibration_protocol=calibration_protocol(cfg))
 
 
 def device_contract(device):
@@ -43,6 +45,8 @@ class CalibrationStore:
 
     def load(self, session_id, selection, cfg):
         from .six_class_improved import fit_alignment
+        protocol = calibration_protocol(cfg)
+        n_trials = protocol['trials']
         if (not isinstance(session_id, str)
                 or not re.fullmatch(r'\d{8}_\d{6}_[0-9a-f]{8}_[\w-]+', session_id)):
             raise ValueError('上次校准记录无效，请重新选择。')
@@ -62,20 +66,21 @@ class CalibrationStore:
                 raise ValueError('上次校准的被试、模型或输入配置不匹配，请重新校准。')
             if (calibration.get('complete') is not True or calibration.get('reused_from')
                     or calibration.get('state', {}).get('ready') is not True
-                    or calibration['state'].get('completed') != 18):
-                raise ValueError('该记录没有完整的18次校准，请重新校准。')
+                    or calibration['state'].get('completed') != n_trials
+                    or calibration['state'].get('total') != n_trials):
+                raise ValueError(f'该记录没有完整的{n_trials}次校准，请重新校准。')
             with np.load(source/'calibration_arrays.npz', allow_pickle=False) as arrays:
                 windows = arrays['windows'].copy()
                 alignment = arrays['alignment'].copy()
                 task_labels = arrays['task_labels'].copy() if 'task_labels' in arrays else None
-            computed, info = fit_alignment(windows)
+            computed, info = fit_alignment(windows, n_trials=n_trials)
             if (alignment.shape != (30, 30) or not np.isfinite(alignment).all()
                     or not np.allclose(alignment, computed, rtol=1e-9, atol=1e-10)):
                 raise ValueError('保存的校准矩阵核验失败，请重新校准。')
             hand_bias = None
             if selection.get('hand_supervised_calibration'):
                 from .labelled_hand_calibration import validate_labels
-                task_labels = validate_labels(task_labels)
+                task_labels = validate_labels(task_labels, rounds=protocol['rounds'])
                 hand = calibration.get('labelled_hand_calibration',{})
                 hand_bias = np.asarray(hand.get('bias'),dtype=float)
                 if (calibration.get('labels_used') is not True or hand.get('method') != 'pair_logodds_bias'
@@ -97,6 +102,7 @@ class CalibrationStore:
                 saved_at=datetime.fromtimestamp((source/'calibration.json').stat().st_mtime,
                     timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M'),
                 calibration_session_id=calibration['state']['session_id'],
+                calibration_trials=n_trials, calibration_rounds=protocol['rounds'],
                 device=contract, calibration_sha256=digest(source/'calibration.json'),
                 arrays_sha256=digest(source/'calibration_arrays.npz'))
             return dict(summary=summary, windows=windows, alignment=alignment, info=info,
@@ -159,8 +165,9 @@ class CalibrationStore:
                 calibration = json.loads(path.read_text(encoding='utf-8'))
                 if calibration.get('reused_from'):
                     continue  # Show the original once, not every reuse session.
-                if calibration.get('complete') is not True or calibration.get('state',{}).get('completed') != 18:
-                    raise ValueError(f"校准未完成（{calibration.get('state',{}).get('completed',0)}/18）")
+                expected = calibration_protocol(cfg)['trials']
+                if calibration.get('complete') is not True or calibration.get('state',{}).get('completed') != expected:
+                    raise ValueError(f"校准未完成或轮数不匹配（{calibration.get('state',{}).get('completed',0)}/{expected}）")
                 available.append(self.load(path.parent.name,selection,cfg)['summary'])
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 unavailable.append(dict(id=path.parent.name,reason=str(exc)))

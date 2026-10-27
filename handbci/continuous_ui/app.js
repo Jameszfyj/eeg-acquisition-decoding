@@ -8,6 +8,7 @@ let point = {x:300,y:300}, targetPoint = {x:300,y:300}, disconnected = false, of
 let lastStateAt = performance.now(), selectionRevision = 0;
 let pulseUntil = 0, pulseClass = null;
 let workspaceKind='six', lastSixMode='acp';
+let appliedDefaultsModel=null;
 
 let discoveredDevices=[];
 let discoveredTriggerDevices=[], discoveredTriggerPorts=[], triggerSearchPending=false;
@@ -96,7 +97,7 @@ function savedHandMapping(){
   if(revision&&classes.some(c=>c.name==='双脚')&&classes.some(c=>c.name==='舌头')){
     let previous=null;try{previous=localStorage.getItem(key+':revision');}catch{}
     if(previous!==revision){
-      for(const c of classes)if(['双脚','舌头'].includes(c.name))saved[c.id]=c.hand_action;
+      for(const c of classes)if(details?.hand_mapping_reset_all||['双脚','舌头'].includes(c.name))saved[c.id]=c.hand_action;
       try{localStorage.setItem(key,JSON.stringify(saved));localStorage.setItem(key+':revision',revision);}catch{}
     }
   }
@@ -282,6 +283,7 @@ function loadParticipants(){
   for(const person of [...new Set(available.map(m=>m.participant_id))])$('participant').append(option(person,person==='DEMO'?'DEMO · 界面演示':person));
   if(!available.length)$('participant').append(option('','暂无匹配被试'));
   if(state?.running&&available.some(m=>m.participant_id===state.selection?.participant_id))$('participant').value=state.selection.participant_id;
+  else if(available.some(m=>m.is_default))$('participant').value=available.find(m=>m.is_default).participant_id;
   loadModels();
   $('deviceFields').hidden=!['six','four','acp'].includes(mode);
 
@@ -294,6 +296,7 @@ function loadModels(){
   $('model').replaceChildren();for(const m of available)$('model').append(option(m.model_id,m.name));
   if(!available.length)$('model').append(option('','尚无匹配模型'));
   if(state?.running&&available.some(m=>m.model_id===state.selection?.model_id))$('model').value=state.selection.model_id;
+  else if(available.some(m=>m.is_default))$('model').value=available.find(m=>m.is_default).model_id;
   loadDetails();
 }
 async function loadDetails(){
@@ -305,6 +308,12 @@ async function loadDetails(){
     if(revision!==selectionRevision)return;
     if(next.requires_calibration&&!Object.hasOwn(next,'previous_calibration'))throw new Error('后台正在更新，暂时无法读取校准记录，请稍后刷新。');
     details=next;
+    if(!state?.running&&appliedDefaultsModel!==details.model_id){
+      const fields=['decisionMode','voteWindow','voteRatio','decisionTimeout','cooldown','threshold','margin','stable','release','collectionMode','promptRest','promptPrepare','promptLoops','promptMarking','outputMode'];
+      for(const id of fields)if(Object.hasOwn(details.ui_defaults||{},id))$(id).value=details.ui_defaults[id];
+      if(Object.hasOwn(details.ui_defaults||{},'calibrationSound'))$('calibrationSound').checked=!!details.ui_defaults.calibrationSound;
+      appliedDefaultsModel=details.model_id;promptedFields();decisionFields();outputFields();
+    }
     const previous=populateSavedCalibrations();
     $('brainCalibrationMode').querySelector('option[value="reuse"]').disabled=!previous;
     $('brainCalibrationMode').querySelector('option[value="reuse"]').textContent=previous?'使用已保存校准':'使用已保存校准（暂无完整记录）';
@@ -312,9 +321,9 @@ async function loadDetails(){
     renderSavedCalibrationInfo();
     if(!state?.running)selectSavedHandConnection();
     if(!state?.running){buildDial(details.classes);renderedSignature=JSON.stringify(details.classes);}
-    text('modelMeta',details.source==='p01_six_acp_observation'?(details.requires_calibration?'改进模型 · IFNet＋脚舌复判\n本次连接先校准3轮，共18次任务。':'基础模型 · 六分类IFNet\n连接后直接持续解码。'):details.source==='dy_four_acp'?'4类 · 实时输入32路 / 模型30路\n1000 → 250 Hz · 窗口2 s\n旧模型历史参考设置未完整记录，实时效果须实测。':details.source==='probability_demo'?'6类 · 人工概率演示 · 无脑电输入':`${details.n_classes}类 · ${details.channels.length}通道 · ${details.sample_rate} Hz\n窗口 ${details.window_seconds} s · ${details.unit}`);
+    text('modelMeta',details.source==='p01_six_acp_observation'?(details.requires_calibration?`${details.name}\n本次连接先校准${calibrationRounds()}轮，共${calibrationTotal()}次任务。`:'基础模型 · 六分类IFNet\n连接后直接持续解码。'):details.source==='dy_four_acp'?'4类 · 实时输入32路 / 模型30路\n1000 → 250 Hz · 窗口2 s\n旧模型历史参考设置未完整记录，实时效果须实测。':details.source==='probability_demo'?'6类 · 人工概率演示 · 无脑电输入':`${details.n_classes}类 · ${details.channels.length}通道 · ${details.sample_rate} Hz\n窗口 ${details.window_seconds} s · ${details.unit}`);
     text('contextText',$('mode').value==='demo'?'六类交互演示':`${$('participant').value} / ${$('model').selectedOptions[0]?.textContent||''}`);
-    text('contextNote',{six:details.requires_calibration?'改进模型 → 18次脑电校准 → 持续解码':'基础模型 → 持续解码',demo:'概率演示 · 无模型推理 · 无真实脑电',simulated:'人工信号 → 已训练模型 → 模拟动作',acp:'Neusen ACP → 已训练模型 → 模拟动作',four:'ACP实时采集 → 既有四类模型 → 网页识别结果'}[$('mode').value]);
+    text('contextNote',{six:details.requires_calibration?`改进模型 → ${calibrationTotal()}次脑电校准 → 持续解码`:'基础模型 → 持续解码',demo:'概率演示 · 无模型推理 · 无真实脑电',simulated:'人工信号 → 已训练模型 → 模拟动作',acp:'Neusen ACP → 已训练模型 → 模拟动作',four:'ACP实时采集 → 既有四类模型 → 网页识别结果'}[$('mode').value]);
     calibrationChoiceChanged();
   }catch(e){if(revision===selectionRevision)showMessage(e.message,true);}
 }
@@ -343,6 +352,8 @@ function requestConfig(){return{participant:$('participant').value,model_id:$('m
   calibration_mode:usesPreviousCalibration()?'reuse':'new',calibration_source:usesPreviousCalibration()?selectedCalibration()?.id:undefined,
   calibration_audio:!!details?.requires_calibration&&!usesPreviousCalibration()&&$('calibrationSound').checked,output:outputConfig(),hand_actions:[...$('mapping').querySelectorAll('select')].map(e=>e.value),decision:decisionConfig()};}
 function usesPreviousCalibration(){return !!details?.requires_calibration&&$('brainCalibrationMode').value==='reuse';}
+function calibrationRounds(){return details?.calibration_rounds||3;}
+function calibrationTotal(){return details?.calibration_trials||calibrationRounds()*6;}
 function calibrationRecords(){return details?.calibration_history||(details?.previous_calibration?[details.previous_calibration]:[]);}
 function selectedCalibration(){
   const records=calibrationRecords();
@@ -353,7 +364,7 @@ function populateSavedCalibrations(){
   let preferred=old;try{preferred=localStorage.getItem('brain-calibration-choice:'+details.participant_id+':'+details.model_id)||old;}catch{}
   if(state?.running&&state.selection?.calibration_reuse)preferred=state.selection.calibration_reuse.id;
   $('savedCalibration').replaceChildren(option('',records.length?'选择完整校准记录':'暂无完整可复用记录'));
-  for(const c of records)$('savedCalibration').append(option(c.id,`${c.saved_at} · 18/18${c.shared_calibration_input?' · 共用脑电/重算本模型':''} · ${c.id}`));
+  for(const c of records)$('savedCalibration').append(option(c.id,`${c.saved_at} · ${c.calibration_trials||calibrationTotal()}/${c.calibration_trials||calibrationTotal()}${c.shared_calibration_input?' · 共用脑电/重算本模型':''} · ${c.id}`));
   for(const c of details?.unavailable_calibrations||[]){const o=option('unavailable:'+c.id,`${c.id} · 不可用：${c.reason}`);o.disabled=true;$('savedCalibration').append(o);}
   if(records.length)$('savedCalibration').value=records.some(c=>c.id===preferred)?preferred:records[0].id;
   return selectedCalibration();
@@ -361,7 +372,7 @@ function populateSavedCalibrations(){
 function renderSavedCalibrationInfo(){
   const previous=selectedCalibration();
   $('savedCalibrationField').hidden=!details?.requires_calibration;
-  text('brainCalibrationHistory',previous?`所选校准：${previous.saved_at} · 18 / 18 · 设备 ${previous.device.serial}${previous.shared_calibration_input?' · 使用原校准脑电，按当前模型重算参数':''}`:'没有完整可复用的校准；完成18次任务并保存后会出现在这里。');
+  text('brainCalibrationHistory',previous?`所选校准：${previous.saved_at} · ${calibrationTotal()} / ${calibrationTotal()} · 设备 ${previous.device.serial}${previous.shared_calibration_input?' · 使用原校准脑电，按当前模型重算参数':''}`:`没有完整可复用的校准；完成${calibrationTotal()}次任务并保存后会出现在这里。`);
   const unavailable=details?.unavailable_calibrations||[];
   text('calibrationUnavailable',unavailable.length?`${unavailable.length}条原记录不可用；最近一条：${unavailable[0].reason}`:'');
 }
@@ -370,7 +381,8 @@ function calibrationChoiceChanged(){
   if(details?.requires_calibration){
     const labelled=!!details.hand_supervised_calibration;
     const title=details.name||(labelled?'六组模型 · 有标签校准（实验）':'改进模型 · IFNet＋脚舌复判');
-    text('brainCalibrationHint',usesPreviousCalibration()?'使用上次已完成的18次校准，无需再执行任务。':details.right_hand_review?'3轮，每轮6类。按提示想象动作，完成后启用右手复核。':labelled?'3轮，每轮6类。提示标签用于校正握拳与旋臂，按实际提示完成。':'3轮，每轮6类。按提示进行运动想象。');
+    const timing=`${calibrationRounds()}轮，每轮6类，共${calibrationTotal()}次；每次想象${details.calibration_imagery_seconds||4}秒，休息${details.calibration_rest_seconds||3}秒。`;
+    text('brainCalibrationHint',usesPreviousCalibration()?`使用上次已完成的${calibrationTotal()}次校准，无需再执行任务。`:timing+(details.right_hand_review?'按提示想象动作，完成后启用右手复核。':labelled?'':'按提示进行运动想象。'));
     text('modelMeta',title+'\n'+(usesPreviousCalibration()?'完整校准已就绪，点击下方开始解码。':'先点击开始校准，完成后再单独开始解码。')+(labelled?'\n实验功能，在线改善尚未验证。':''));
     text('contextNote',usesPreviousCalibration()?title+' · 校准已就绪 · 等待开始解码':title+' · 先校准 · 完成后待命');
   }
@@ -416,12 +428,13 @@ function renderBrainCalibration(){
   $('calibrationAudioSettings').hidden=!!focus||usesPreviousCalibration();
   $('stopCalibration').hidden=!focus;
   $('startCalibration').hidden=!!focus;
-  const completed=active?(c.completed||0):usesPreviousCalibration()?18:0;
-  $('brainCalibrationCount').textContent=String(completed)+' / 18';
-  $('brainCalibrationProgress').style.width=completed/18*100+'%';
+  const total=active?(c.total||calibrationTotal()):calibrationTotal();
+  const completed=active?(c.completed||0):usesPreviousCalibration()?total:0;
+  $('brainCalibrationCount').textContent=String(completed)+' / '+total;
+  $('brainCalibrationProgress').style.width=completed/total*100+'%';
   const label=!active?(usesPreviousCalibration()?'使用上次校准':'准备重新校准'):state.status==='stopping'?'正在停止':c.ready?'校准完成':c.phase==='imagery'?c.task:c.phase==='rest'?'放松休息':c.stream_recovery_count?'重新准备当前任务':'准备校准';
   $('brainCalibrationTask').textContent=label;
-  $('brainCalibrationDetail').textContent=!active?(usesPreviousCalibration()?'校准已就绪；到下方解码区域点击开始解码。也可点击开始校准重新采集。':'点击开始校准，按语音和文字完成18次任务；完成后保存并待命。'):c.phase==='rest'?'下一项：'+c.task:c.phase==='imagery'?'听到休息提示后放松。':c.ready?(state.session_purpose==='calibration'?'校准完成，正在保存；保存后等待手动开始解码。':'已载入完整校准，正在准备解码。'):'请保持放松，等待提示。';
+  $('brainCalibrationDetail').textContent=!active?(usesPreviousCalibration()?'校准已就绪；到下方解码区域点击开始解码。也可点击开始校准重新采集。':`点击开始校准，按语音和文字完成${total}次任务；完成后保存并待命。`):c.phase==='rest'?'下一项：'+c.task:c.phase==='imagery'?'听到休息提示后放松。':c.ready?(state.session_purpose==='calibration'?'校准完成，正在保存；保存后等待手动开始解码。':'已载入完整校准，正在准备解码。'):'请保持放松，等待提示。';
   if(active&&!c.ready&&c.phase==='warming'&&c.stream_recovery_count)$('brainCalibrationDetail').textContent=`接收异常后的窗口已清空，已完成的${c.completed}项保留。请放松，等待当前任务重新提示。`;
   if(active&&!c.reused&&(c.awaiting_display||c.ready)&&document.visibilityState==='visible'){
     requestAnimationFrame(()=>requestAnimationFrame(()=>calibrationPrompts.present(c)));
@@ -891,7 +904,7 @@ document.addEventListener('visibilitychange',()=>{
     stopDecoder().then(()=>showMessage('任务提示页面已离开前台，会话已停止并保留记录。')).catch(e=>showMessage(e.message,true));
   }
 });
-async function init(){try{models=await api('/api/models');const initial=await api('/api/state');workspaceKind=initial.running&&initial.mode==='four'?'four':'six';const preferredMode=models.some(m=>m.source==='neuracle_acp')?'acp':'demo';$('mode').value=initial.running?initial.mode:preferredMode;lastSixMode=preferredMode;$('outputMode').value=initial.running?initial.output_mode||'simulation':'simulation';
+async function init(){try{models=await api('/api/models');const initial=await api('/api/state');workspaceKind=initial.running&&initial.mode==='four'?'four':'six';const preferred=models.find(m=>m.is_default);const preferredMode=preferred?({p01_six_acp_observation:'six',neuracle_acp:'acp',synthetic_tcp:'simulated',probability_demo:'demo'}[preferred.source]||'acp'):models.some(m=>m.source==='neuracle_acp')?'acp':'demo';$('mode').value=initial.running?initial.mode:preferredMode;lastSixMode=preferredMode;$('outputMode').value=initial.running?initial.output_mode||'simulation':'simulation';
   $('decisionMode').value=(initial.running&&initial.decision_settings?.mode)||(workspaceKind==='four'?'stable':'vote');
   $('cooldown').value=workspaceKind==='four'?'2':'4';
   if(initial.running&&initial.decision_settings){for(const [id,key] of Object.entries({voteWindow:'vote_window_seconds',voteRatio:'vote_ratio',decisionTimeout:'decision_timeout_seconds',cooldown:'cooldown_seconds',threshold:'confidence',margin:'margin',stable:'stable_seconds',release:'release_seconds'}))if(initial.decision_settings[key]!==undefined)$(id).value=initial.decision_settings[key];}

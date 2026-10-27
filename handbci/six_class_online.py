@@ -14,9 +14,10 @@ from scipy import signal
 
 from .four_class_online import CHANNELS, SCALP, FourClassDecoder, digest
 from .preprocess import filter_bank
+from .workbench_settings import local_path
 
 ROOT = Path(__file__).resolve().parents[1]
-BATCH = ROOT/'六分类数据_20261023_常规_三组60轮'
+BATCH = local_path('research_data_root', ROOT/'六分类数据_20261023_常规_三组60轮')
 BASE = BATCH/'六分类训练'
 MODEL = BASE/'models/six_class_ifnet_final.pt'
 MODEL_ID = 'p01-six-20261023-offline-observation'
@@ -25,7 +26,7 @@ IMPROVED_ID = 'p01-six-20261023-pair-router'
 IMPROVED_MODEL = BATCH/'六分类改进对照/完整六分类候选/six_class_pair_router_candidate.pt'
 IMPROVED_SHA256 = '1883a8b69dd37a1fcd678a7aa83c8fe25e08d0342f33491464df560e97a116f4'
 LABELLED_ID = 'p01-six-20261024-labelled-calibration-experiment'
-LABELLED_MODEL = BATCH/'握拳旋臂专项_20261024/有标签动作校准/small_gain_calibrated_candidate.pt'
+LABELLED_MODEL = local_path('labelled_checkpoint', BATCH/'握拳旋臂专项_20261024/有标签动作校准/small_gain_calibrated_candidate.pt')
 LABELLED_SHA256 = 'c196b4c27b81567f6888ef1e8ed9d46338301b2dae6d146eabc547ba0a4433b6'
 RIGHT_REVIEW_ID = 'p01-six-20261024-right-hand-review-experiment'
 RIGHT_COMBINED_ID = 'p01-six-20261024-right-hand-combined-experiment'
