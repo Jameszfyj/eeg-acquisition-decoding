@@ -2,7 +2,6 @@
   "asset": "P01_909_20round_calibrated_ONNX.zip",
   "bytes": 7921906,
   "sha256": "03e1e05a62e1d2aba25cf46ff33638a16edde9f932fad5ea4c72f94a2349d191",
-  "release_url": "https://github.com/Jameszfyj/eeg-acquisition-decoding/releases/tag/p01-909-20round-onnx-20261028",
   "source_model_sha256": "83826a020139dbedbf2c6711ca92d45aa0d5dd50f82b397b5333a259a20a78c4",
   "calibration_rounds": 20,
   "training_tasks": 909,
@@ -30,5 +29,6 @@
     "hardware_connected": false,
     "platform_tests_passed": 142,
     "tool_tests_passed": 29
-  }
+  },
+  "distribution": "separately_shared_onnx_zip"
 }
