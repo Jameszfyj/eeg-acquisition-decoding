@@ -1,8 +1,8 @@
 {
   "tag": "p01-bundle-20261027",
   "asset": "p01-models-and-calibration-20261027.zip",
-  "bytes": 392757079,
-  "sha256": "5bb4a3d7730cbe10f88449c3f505cab7abb9b98d82ab7fc379ef785138c126b0",
+  "bytes": 392752713,
+  "sha256": "9054eff640cb24535595da3b7000dc60f006bbf12718b3407b7dd8debfb41682",
   "release_url": "https://github.com/Jameszfyj/eeg-acquisition-decoding/releases/tag/p01-bundle-20261027",
   "default_model": "P01_studio_v2_7a5721d022ce",
   "model_sha256": "7a5721d022ce08286a6ad8336446132e96c5d47f551dfc55790677af0f7e0599",
@@ -18,5 +18,10 @@
     "clean_checkout_loaded": true,
     "file_hashes_verified": true,
     "physical_device_online_validated": false
+  },
+  "models_only": {
+    "asset": "p01-models-20261027.zip",
+    "bytes": 299987,
+    "sha256": "a89566478369fff6b3dbd2fbeb7fa0c6ef3fca262bdbcd0ac23320426bdde336"
   }
 }

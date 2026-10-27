@@ -1,6 +1,6 @@
 # 随附模型与校准数据
 
-下载[2026-10-27 P01模型与校准数据包](https://github.com/Jameszfyj/eeg-acquisition-decoding/releases/tag/p01-bundle-20261027)中的 `p01-models-and-calibration-20261027.zip`，将内容解压到本项目根目录。
+从[2026-10-27 P01下载页](https://github.com/Jameszfyj/eeg-acquisition-decoding/releases/tag/p01-bundle-20261027)选择 `p01-models-20261027.zip`（模型和接入配置）或 `p01-models-and-calibration-20261027.zip`（另含两份完整校准记录），将内容解压到本项目根目录。
 
 如果已有自己的 `configs/subject_models.json` 或 `configs/workbench.local.json`，先保留副本，再合并模型条目和本机设置。解压不会启动硬件。
 
@@ -22,10 +22,11 @@
 | `runtime/continuous/20261027_203237_19b894b4_P01/` | 19:52原始采集会话的校准导入记录，120次、每类20次，含完整 `source/session.json`、`source/data.h5` 和提取后的原始校准数组 |
 | `runtime/continuous/20261027_212051_dada5c40_P01/` | 20:28原始采集会话的校准导入记录，同样120次、每类20次 |
 | `configs/` | 使用相对路径的模型登记、默认选择和手势映射 |
-| `local/hand_calibration.json` | 当前使用的机械手姿态配置，换机械手须重新核对 |
 | `SHA256SUMS.txt` | 包内文件校验值 |
 
 原始两份会话的编号分别是 `20261027_195257_c2ebca2b_P01`、`20261027_202845_9fbc0bf6_P01`。为保持平台已有校准编号，目录沿用导入后的编号；原编号、时序及来源校验值保留在各目录的导入元数据中。原始JSON/H5不做改写。
+
+包中保留类别到手势的映射。机械手连接与姿态须按当前设备单独配置，包内不附本机历史操作记录。
 
 ## 使用校准数据
 
