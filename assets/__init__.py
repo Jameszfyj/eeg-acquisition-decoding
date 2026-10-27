@@ -1,0 +1,1 @@
+"""Static UI illustration assets."""

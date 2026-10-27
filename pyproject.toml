@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eeg-acquisition-decoding"
+version = "0.1.0"
+description = "Local EEG acquisition and continuous decoding workbenches with portable ONNX model contracts"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26,<3", "scipy>=1.11,<2", "h5py>=3.10,<4", "pyserial>=3.5,<4"]
+
+[project.optional-dependencies]
+decode = ["torch>=2.5,<3", "onnx>=1.18,<2", "onnxruntime>=1.20,<2"]
+dev = ["build>=1.2"]
+
+[project.scripts]
+eeg-acquire = "handbci.studio.server:main"
+eeg-decode = "handbci.continuous_online:main"
+eeg-cli = "handbci.cli:main"
+eeg-pack-model = "handbci.model_bundle:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["handbci*", "configs", "assets"]
+
+[tool.setuptools.package-data]
+handbci = ["*.json", "ui/*", "online_ui/*", "continuous_ui/*", "viewer_ui/*", "studio/web/*"]
+configs = ["*.json"]
+assets = ["task_cues_20261025/*.png"]

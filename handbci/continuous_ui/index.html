@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="online-token" content="__UI_TOKEN__">
+  <title>脑电实时解码 · 六类与四类测试</title>
+  <link rel="stylesheet" href="/styles.css"><script src="/cues.js" defer></script><script src="/calibration_prompts.js" defer></script><script src="/action_prompts.js" defer></script><script src="/screen_recorder.js" defer></script><script src="/app.js" defer></script>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="在线解码首页"><span class="brand-symbol">◈</span><span>脑电解码<span class="brand-sub">CONTINUOUS / LOCAL</span></span></a>
+    <div class="workspace-switch" role="group" aria-label="解码入口"><button id="sixWorkspace" class="selected" aria-pressed="true">通用解码</button><button id="fourWorkspace" aria-pressed="false">四分类测试</button></div>
+    <div class="side-heading"><span>会话配置</span><span class="version">V0.1</span></div>
+    <label class="field">数据来源<select id="mode"><option value="acp">导入模型 · ACP直连</option><option value="simulated">导入模型 · 模拟脑电</option><option value="demo">界面演示（不推理）</option><option value="six">原研究模型 · 六分类</option><option value="four" hidden>真实脑电 · ACP直连</option></select></label>
+    <p id="sourceHint" class="field-note">六分类 · 选择基础模型或需要校准的改进模型。</p>
+    <label class="field">被试编号<select id="participant"></select></label>
+    <label class="field">解码模型<select id="model"></select></label>
+    <details class="side-details"><summary>导入自己的模型</summary>
+      <label class="field">被试编号<input id="importParticipant" maxlength="64" placeholder="与模型内部编号一致"></label>
+      <label class="field">显示名称（可选）<input id="importName" maxlength="100"></label>
+      <label class="field">模型文件<input id="importFile" type="file" accept=".zip,.pt"></label>
+      <button id="importModel" class="button secondary">导入并检查</button>
+      <p id="importStatus" class="field-note" role="status">支持ONNX模型包ZIP及本项目IFNet格式PT，最多32MB。导入不会连接设备。</p>
+    </details>
+    <div id="deviceFields" hidden>
+      <label class="field">脑电设备<select id="eegDevice"><option value="">正在自动搜索设备…</option></select></label>
+      <div class="two-fields"><label class="field">设备IP（可手填）<input id="host" placeholder="搜索或填写实际IP"></label><label class="field">ACP端口<input id="port" type="number" min="1" max="65535" value="4097"></label></div>
+      <button id="discoverEEG" class="button secondary">重新搜索设备</button>
+      <p id="eegDiscoveryResult" class="field-note" role="status">正在自动搜索同网段脑电设备…</p>
+      <button id="checkEEG" class="button secondary" disabled>测试脑电连接</button>
+      <p id="eegCheckResult" class="field-note" role="status">选择设备后，可在此直接测试连接。</p>
+      <p id="deviceHint" class="field-note">自动搜索并连接设备，无需填写地址，也无需先在采集平台连接。其他程序若正在占用设备，请先断开该连接。</p>
+    </div>
+    <div id="modelMeta" class="model-meta">正在读取模型列表…</div>
+    <label id="outputField" class="field">动作输出<select id="outputMode"><option value="simulation">仅网页模拟 · 不连接机械手</option><option value="inspire">真实机械手 · Inspire</option></select></label>
+    <p id="outputHint" class="field-note" hidden>开始真实解码时先伸直五指，保持已保存的拇指朝向；确认归位后再接收解码动作。改进模型使用上次校准或重新校准，每次动作完成后返回起始位置。</p>
+    <details id="handSettings" class="side-details" open><summary>机械手连接</summary>
+      <label class="field">机械手串口<select id="handPort"><option value="">正在搜索串口…</option></select></label>
+      <div class="two-fields hand-buttons"><button id="refreshPorts" class="button secondary">重新搜索</button><button id="checkHand" class="button secondary">测试连接</button></div>
+      <div class="two-fields"><label class="field">波特率<input id="handBaud" type="number" value="115200" min="1"></label><label class="field">机械手 ID<input id="handId" type="number" value="1" min="1" max="16383"></label></div>
+      <p class="field-note">连接检查只读取位置和故障状态，不执行动作，检查后释放串口。无需先连接脑电，也不受动作输出选项限制。</p>
+      <p id="handCheckResult" class="field-note" role="status"></p>
+    </details>
+    <details id="promptedSettings" class="side-details" open><summary>带提示在线采集</summary>
+      <label class="field">运行方式<select id="collectionMode"><option value="continuous">自由持续解码</option><option value="prompted">按目标提示采集</option></select></label>
+      <div id="promptedFields" hidden>
+        <div class="two-fields"><label class="field">回位后休息 / 秒<input id="promptRest" type="number" value="2" min="0" max="20" step="0.5"></label><label class="field">预提示准备 / 秒<input id="promptPrepare" type="number" value="2" min="0.5" max="20" step="0.5"></label></div>
+        <p id="promptTimingHint" class="field-note">回位后间隔共4秒：休息2秒＋预提示2秒。两段包含在总间隔内；总间隔可在“判决参数”中修改。</p>
+        <div class="two-fields"><label class="field">轮数<input id="promptLoops" type="number" value="4" min="1" max="100" step="1"></label><label class="field">随机种子<input id="promptSeed" type="number" min="0" max="2147483647" step="1" placeholder="自动生成"></label></div>
+        <label class="field">标记方式<select id="promptMarking"><option value="serial">USB TriggerBox · 回传核验</option><option value="software">软件标记 · 接收时钟估计</option></select></label>
+        <div id="promptHardware">
+          <label class="field">TriggerBox串口<select id="promptPort"><option value="">正在等待自动搜索…</option></select></label>
+          <label class="field trigger-wireless-choice"><span><input id="promptWireless" type="checkbox" checked> 通过Wi-Fi接收事件并同步脑电</span></label>
+          <div id="promptWirelessFields"><label class="field">TriggerBox数据设备<select id="promptDevice"><option value="">正在等待自动搜索…</option></select></label></div>
+          <div class="two-fields hand-buttons"><button id="discoverTrigger" class="button secondary">重新搜索TriggerBox</button><button id="checkTrigger" class="button secondary">检验连接与回传</button></div>
+          <p id="triggerDiscoveryResult" class="field-note" role="status">选择带提示采集后自动搜索，无需填写串口或IP。</p>
+          <p id="triggerCheckResult" class="field-note" role="status">尚未检验；设备身份、时钟同步和事件回传分别核验。</p>
+          <p class="field-note">USB负责发送标记，Wi-Fi接收事件；只找到一台时自动选中，多台时从列表选择。检验时临时连接所选脑电设备，不驱动机械手，检验后释放连接。采用有线回传时可关闭Wi-Fi选项。</p>
+        </div>
+        <p class="field-note">每轮每类一次，随机提示；支持2至6类。沿用下方投票参数，动作回位及间隔结束后进入下一条，不增加固定想象时长。模型校准单独进行。真实执行需选择真实机械手。</p>
+      </div>
+    </details>
+    <details class="side-details"><summary>判决参数</summary>
+      <label class="field">判决方式<select id="decisionMode"><option value="vote" selected>多次预测投票 · 可重复同一动作</option><option value="stable">连续稳定判决</option></select></label>
+      <div id="voteSettings">
+        <div class="two-fields"><label class="field">投票时间 / 秒<input id="voteWindow" type="number" value="2" min="0.5" max="20" step="0.5"></label><label class="field">得票比例<input id="voteRatio" type="number" value="0.65" min="0.5" max="1" step="0.05"></label></div>
+        <label class="field">最长判决等待 / 秒<input id="decisionTimeout" type="number" value="3.5" min="0.5" max="20" step="0.5"></label>
+      </div>
+      <div id="stableSettings" hidden>
+        <div class="two-fields"><label class="field">概率阈值<input id="threshold" type="number" value="0.70" min="0.5" max="0.99" step="0.01"></label><label class="field">类别差距<input id="margin" type="number" value="0.15" min="0" max="0.8" step="0.01"></label></div>
+        <div class="two-fields"><label class="field">稳定时间 / 秒<input id="stable" type="number" value="0.8" min="0.2" max="20" step="0.1"></label><label class="field">释放时间 / 秒<input id="release" type="number" value="0.5" min="0.2" max="20" step="0.1"></label></div>
+      </div>
+      <label class="field">回位后间隔 / 秒<input id="cooldown" type="number" value="4" min="0.5" max="20" step="0.5"></label>
+      <p id="decisionHint" class="field-note">最近2秒的预测投票，达到65%得票即触发；判决最长等待3.5秒，从本轮有效预测开始计算。带提示模式默认回位后间隔4秒，包含2秒休息和2秒预提示；正式开始后再积累新脑电窗口及投票证据。</p>
+    </details>
+    <details id="mappingSettings" class="side-details"><summary>真实类别 → 机械手动作</summary><div id="mapping"></div><p class="field-note">显示所选模型原始ID、名称和任务。下拉框只调整动作映射，不修改训练标签。请按实际类别确认动作映射。</p></details>
+    <div class="session-controls"><button id="check" class="button secondary">检查模型配置</button></div>
+    <div class="side-footer"><span class="local-dot"></span> 本机运行 · 默认模拟输出<br><span>改进模型可复用已完成的校准</span></div>
+  </aside>
+  <main>
+    <header class="page-header"><div><p class="eyebrow">NEURAL CONTROL WORKSPACE</p><h1 id="pageTitle">持续解码工作台</h1><p id="pageSubtitle" class="subtitle">观察每一次预测，让稳定的意图成为动作。</p></div><div class="header-right"><span id="statusBadge" class="status-badge">● 待机</span><button id="fullscreen" class="icon-button" title="切换全屏" aria-label="切换全屏">⛶</button></div></header>
+    <div id="errorBox" class="message error" role="alert" hidden></div><div id="notice" class="message" role="status" hidden></div>
+    <div class="context-bar"><span id="contextText">六类交互演示</span><span id="contextNote">概率演示 · 无模型推理 · 无真实脑电</span></div>
+    <details id="calibrationPanel" class="panel calibration-panel">
+      <summary>动作设置 · 已保存的姿态</summary>
+      <p class="field-note">固定六路顺序：[小指、无名指、中指、食指、拇指弯曲、拇指旋转]。0–1000是位置刻度，弯曲通道1000为张开；-1跳过。100刻度的实际角度无法确定。页面加载不发送动作，两个六类模型共用本配置。</p>
+      <label class="field">六路初始基准位置<input id="baseline" placeholder="五路弯曲通道为1000，旋转保留已校准朝向"></label>
+      <p class="field-note">开始真实会话时先让五指到达伸直基准，拇指旋转保持当前位置。六个动作均为一次往返：先读取本次动作前的位置，目标到位后自动返回这些位置。单指只驱动对应弯曲通道；OK使用已保存的捏合目标，动作后回到伸直起始位置。</p>
+      <div id="handProfiles"></div>
+      <p class="field-note">每次只弯曲/捏合一次并返回，不停在弯曲位置。返回到位才算完成，之后才计算动作间隔；整个往返不接收排队动作。投票模式允许重新识别并连续执行相同动作。停止或故障时尽力保持当前位置，不继续执行自动返回。旧缓存中的“保持姿态/返回基准”设置不再用于六动作，位置和速度等校准值保留。网页也只演示一次往返，示意耗时不代表实物耗时。</p>
+    </details>
+    <section id="brainCalibration" class="panel brain-calibration" hidden aria-label="改进模型脑电校准">
+      <div class="calibration-heading"><h2>脑电校准</h2><span id="brainCalibrationCount">0 / 18</span></div>
+      <p id="brainCalibrationHint">3轮，每轮6类。按提示进行运动想象。</p>
+      <div id="calibrationChoice"><label class="field">本次校准<select id="brainCalibrationMode"><option value="reuse" disabled>使用已保存校准（正在读取）</option><option value="new" selected>重新校准</option></select></label><label id="savedCalibrationField" class="field" hidden>选择历史校准<select id="savedCalibration"><option value="">暂无完整记录</option></select></label><p id="brainCalibrationHistory" class="field-note" role="status"></p><p id="calibrationUnavailable" class="field-note"></p><p class="field-note">同一被试且脑电帽未摘下或调整时可复用完整18次校准。三个有标签实验模型可共用校准脑电，各自重算参数；重新戴帽或调整电极后请重新校准。</p></div>
+      <div id="calibrationAudioSettings" class="calibration-audio-settings"><label><input id="calibrationSound" type="checkbox" checked> 语音提示</label><button id="previewCalibrationAudio" class="button secondary">试听语音</button><span id="brainAudioStatus" role="status">开始前自动准备语音</span></div>
+      <strong id="brainCalibrationTask" role="status" aria-live="polite">等待开始校准</strong>
+      <div class="calibration-track"><i id="brainCalibrationProgress"></i></div>
+      <p id="brainCalibrationDetail">校准完成后保存并待命，再到下方解码区域点击开始解码。</p>
+      <div class="calibration-controls"><button id="startCalibration" class="button primary" disabled>▶ 开始校准</button><button id="stopCalibration" class="button stop" hidden>停止校准并保存</button></div>
+    </section>
+    <section id="promptedPanel" class="panel prompted-panel" hidden aria-label="在线控制目标提示">
+      <div class="panel-heading"><h2>本次控制目标</h2><span id="promptedCount">0 / 24</span></div>
+      <strong id="promptedTarget" role="status">等待目标提示</strong>
+      <p id="promptedTask">按提示进行运动想象，身体保持放松。</p>
+      <p id="promptedStatus" class="field-note">等待开始</p>
+      <button id="stopPrompted" class="button stop">停止并保存</button>
+    </section>
+    <section class="workspace">
+      <article class="panel decoder-panel">
+        <div class="panel-heading"><div><span class="section-index">01</span><h2>解码空间</h2></div><span class="small-label" id="classCount">6 CLASS</span></div>
+        <div class="decode-controls"><button id="start" class="button primary" disabled>▶ 开始解码</button><button id="stop" class="button stop" disabled>■ 停止解码并保存</button><p id="decodeStartHint" class="field-note">自由持续解码直接在本页开始，显示圆盘、实时概率和脑电波形，不显示或播报目标提示。</p></div>
+        <div id="recordingOptions" class="recording-options"><label><input id="recordScreen" type="checkbox"> 录制解码展示屏</label><p id="recordingHint" class="field-note">可选。点击开始时选择要录制的展示屏；解码结束后自动保存到本机并提供下载。</p></div>
+        <div class="dial-wrap"><svg id="dial" viewBox="0 0 600 600" role="img" aria-label="六类别概率、候选方向与稳定判决进度">
+          <defs><radialGradient id="halo"><stop offset="0" stop-color="#153e43" stop-opacity=".5"/><stop offset="1" stop-color="#102027" stop-opacity="0"/></radialGradient><filter id="glow"><feGaussianBlur stdDeviation="5"/></filter></defs>
+          <circle cx="300" cy="300" r="280" fill="url(#halo)"/><g id="sectors"></g>
+          <circle class="orbit" cx="300" cy="300" r="251"/><circle class="orbit inner" cx="300" cy="300" r="104"/>
+          <g id="guides"></g><circle class="hub" cx="300" cy="300" r="76"/>
+          <text id="hubTitle" class="hub-title" x="300" y="291" text-anchor="middle">等待开始</text><text id="hubSub" class="hub-sub" x="300" y="316" text-anchor="middle">暂不输出</text>
+          <circle id="ballGlow" cx="300" cy="300" r="17" fill="#69e0c3" opacity=".30" filter="url(#glow)"/><circle id="ball" cx="300" cy="300" r="7" fill="#c1ffed" stroke="#65d9bc" stroke-width="2"/>
+        </svg><div class="dial-legend"><span><i class="legend-dot"></i> 当前候选</span><span><i class="legend-line"></i> 向外积累 → 触发边界</span></div></div>
+        <div class="decision-strip"><span class="decision-icon">◎</span><div><span class="overline">判决状态</span><p id="decisionReason">等待开始持续解码</p></div><span id="progressValue" class="progress-value">—</span></div>
+      </article>
+      <aside class="feedback-column">
+        <article id="decodeProbabilities" class="panel decode-probabilities" hidden aria-label="六种机械手动作的实时概率"><div class="panel-heading"><h2>实时概率</h2></div><div id="liveProbabilityHome"></div></article>
+        <article class="panel prediction-panel"><div class="panel-heading"><div><span class="section-index">02</span><h2>当前预测</h2></div><span id="predictionLive" class="live-tag">等待输入</span></div><div class="prediction-row"><div><p id="predictedClass" class="predicted-class">—</p><span class="muted small">概率最高的类别</span></div><div class="probability-number"><strong id="topProbability">—</strong><span>%</span></div></div><p id="predictionNote" class="prediction-note">当前预测持续变化；动作是否到位以执行状态为准。</p></article>
+        <article class="panel action-panel" id="actionPanel"><div class="panel-heading"><div><span class="section-index">03</span><h2 id="outputTitle">模拟动作</h2></div><span id="outputBadge" class="mock-tag">SIMULATED</span></div>
+          <div class="hand-stage"><svg id="handDrawing" class="hand" viewBox="0 0 260 210" role="img" aria-label="最近动作的手指组合示意，不代表实测姿态">
+            <g class="hand-lines"><path d="M94 105 L94 150 Q94 171 110 177 L110 192 L165 192 L165 177 Q183 164 183 145 L183 106 Z"/>
+            <path id="fingerThumb" class="finger thumb" d="M98 142 Q63 136 62 106 Q62 92 73 100 L106 127"/>
+            <path id="fingerIndex" class="finger index" d="M100 108 L100 57 Q100 40 113 45 Q120 47 119 60 L119 107"/>
+            <path id="fingerMiddle" class="finger middle" d="M123 106 L123 34 Q123 20 136 23 Q145 26 143 41 L143 106"/>
+            <path id="fingerRing" class="finger ring" d="M146 106 L146 48 Q146 34 158 38 Q167 41 165 53 L165 107"/>
+            <path id="fingerLittle" class="finger little" d="M168 108 L168 72 Q168 57 179 63 Q187 67 184 80 L182 111"/>
+            <path d="M110 149 L162 149 M116 164 L155 164" class="hand-detail"/>
+            <circle cx="130" cy="132" r="19" class="palm-halo"/><circle cx="130" cy="132" r="7" class="palm-core"/>
+            <path d="M47 62 L47 44 L64 44 M195 44 L212 44 L212 62 M47 158 L47 176 L64 176 M195 176 L212 176 L212 158" class="hand-brackets"/></g>
+          </svg><span class="hand-caption">手指组合示意 · 非实测轨迹或位置</span></div>
+          <div class="action-description"><p class="overline">最近已触发</p><h3 id="lastAction">尚未输出动作</h3><p id="lastActionMeta" class="muted small">稳定判决后在这里显示</p></div><div id="actionSlots" class="action-slots"></div>
+          <div class="hand-status"><span id="handState">未连接机械手 · 模拟输出</span><span id="motionDuration">—</span></div>
+          <div class="action-count"><span id="commandLabel">本次动作指令</span><strong id="commandCount">00</strong></div>
+        </article>
+      </aside>
+    </section>
+    <section id="decodeWavePanel" class="panel decode-wave-panel" hidden aria-label="实时脑电波形"><div id="liveWaveHome"></div></section>
+    <section class="metrics" aria-label="实时接收与推理指标"><div><span>运行时间</span><strong id="wallTime">00:00</strong><small>本机时钟</small></div><div><span>实际接收速率</span><strong id="inputRate">—</strong><small id="rateNote">等待脑电输入</small></div><div><span>预测次数</span><strong id="predictionCount">0</strong><small id="inferenceNote">尚未预测</small></div><div><span>数据缺口</span><strong id="gapCount">—</strong><small id="gapNote">真实数据模式监测</small></div></section>
+    <details class="panel monitor-panel" id="monitor"><summary><span>信号与类别概率</span><span class="muted small">展开监测</span></summary><div class="monitor-grid"><div><h3>各类预测概率</h3><div id="monitorProbabilityHome"><div id="probabilities"></div></div></div><div id="monitorWaveHome"><div id="waveformContent"><div class="wave-heading"><h3 id="waveTitle">实时脑电波形</h3><span id="wavePhase" class="wave-phase" role="status">等待开始</span><label class="wave-scale">量程<select id="waveScale" aria-label="三通道统一显示量程"><option value="50" selected>±50 μV</option><option value="100">±100 μV</option><option value="200">±200 μV</option><option value="500">±500 μV</option></select></label></div><canvas id="wave" aria-label="C3、Cz、C4三通道最近五秒脑电，共用时间轴和固定量程"></canvas><p id="waveHint" class="muted small">C3 · Cz · C4 · 最近5秒 · 连接后显示真实脑电。</p></div></div></div></details>
+    <section class="panel log-panel"><div class="panel-heading"><div><span class="section-index">04</span><h2 id="logTitle">动作记录</h2></div><span id="logNote" class="muted small">实际动作以机械手回读为准</span></div><div class="table-wrap"><table><thead><tr id="logHead"><th>序号</th><th>时间</th><th>指令动作</th><th>实际动作</th><th>结果</th></tr></thead><tbody id="logRows"><tr><td colspan="5" class="empty">暂无动作记录</td></tr></tbody></table></div></section>
+    <div id="saved" class="saved" hidden><span>记录已保存</span><input id="savedPath" readonly aria-label="记录保存路径"><button id="copyPath" class="button secondary">复制路径</button></div>
+    <section id="screenRecordingResult" class="panel screen-recording-result" hidden><p id="screenRecordingStatus" role="status"></p><p id="screenRecordingPath"></p><a id="screenRecordingDownload" hidden>下载录屏</a></section>
+    <footer class="page-footer"><span id="footerNote">六类任务与动作独立映射 · 机械手按需启用</span><button id="shutdown">关闭本机服务</button></footer>
+  </main>
+</div>
+<div id="monitorControls" class="monitor-controls" hidden aria-label="解码展示控制"><span id="screenRecordingLive" hidden></span><button id="fullscreenMonitor" class="button secondary">展示屏全屏</button><button id="stopMonitor" class="button stop">停止并保存</button></div>
+<section id="subjectFocus" class="subject-focus" hidden aria-label="采集提示">
+  <div class="subject-cue-box">
+    <p id="subjectFocusPhase" class="subject-phase">脑电校准</p>
+    <strong id="subjectFocusText" role="status" aria-live="polite">正在连接</strong>
+    <p id="subjectFocusDetail" class="subject-detail"></p>
+    <button id="stopSubjectFocus" class="button stop">停止并保存</button>
+  </div>
+</section>
+</body></html>

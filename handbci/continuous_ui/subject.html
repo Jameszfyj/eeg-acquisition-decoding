@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="online-token" content="__UI_TOKEN__">
+  <title>机械手控制 · 任务提示</title>
+  <link rel="stylesheet" href="/subject.css">
+  <script src="/cues.js" defer></script>
+  <script src="/action_prompts.js" defer></script>
+  <script src="/screen_recorder.js" defer></script>
+  <script src="/subject.js" defer></script>
+</head>
+<body>
+  <main class="task-card">
+    <p id="taskPhase" class="phase">在线控制</p>
+    <img id="taskImage" class="task-image" alt="" hidden>
+    <strong id="taskTitle" role="status" aria-live="polite">等待开始</strong>
+    <p id="taskDetail" class="detail">将此窗口移到扩展屏，再点击开始。</p>
+    <p id="taskError" class="error" role="alert" hidden></p>
+    <div id="taskRecording" class="recording-info" hidden><p id="taskRecordingStatus" role="status"></p><p id="taskRecordingPath"></p><a id="taskRecordingDownload" hidden>下载录屏</a></div>
+    <div class="controls">
+      <button id="startTask" class="primary" disabled>开始解码</button>
+      <button id="stopTask" class="stop" hidden>停止并保存</button>
+      <button id="fullscreenTask" class="secondary" aria-label="切换全屏">全屏</button>
+    </div>
+  </main>
+</body>
+</html>

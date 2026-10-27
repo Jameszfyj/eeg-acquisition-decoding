@@ -1,0 +1,21 @@
+:root{color-scheme:dark;font-family:"Microsoft YaHei","Segoe UI",sans-serif;background:#0b1218;color:#dce9e5}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;min-height:100vh;min-height:100dvh;display:grid;place-items:center;padding:20px}
+.task-card{width:min(900px,100%);text-align:center;border:1px solid #436f65;border-radius:18px;background:#101c24;padding:24px 30px}
+.phase{margin:0 0 16px;color:#8eafa7;font-size:16px;letter-spacing:2px}
+.task-image{display:block;width:min(49vh,480px,100%);height:min(49vh,480px);object-fit:contain;margin:0 auto 12px;border-radius:14px;background:#eef0f2}
+#taskTitle{display:block;font-size:clamp(34px,5vw,64px);line-height:1.45;color:#b1f5dd;overflow-wrap:anywhere}
+.detail{font-size:18px;line-height:1.6;color:#a1bcb4;margin:16px 0 24px}
+.controls{display:flex;justify-content:center;gap:14px;flex-wrap:wrap;margin-top:22px}
+button{font:inherit;font-size:17px;border-radius:8px;padding:12px 24px;cursor:pointer;min-width:135px;border:1px solid #4b8272}
+button:disabled{opacity:.45;cursor:default}
+.primary{background:#b1f5dd;color:#102b24;font-weight:600}
+.stop{background:#36242c;color:#ffc5cf;border-color:#825663}
+.secondary{background:transparent;color:#a1bcb4;border-color:#3f5b58}
+.error{color:#ffc5cf;font-size:16px;line-height:1.7;overflow-wrap:anywhere}
+.recording-info{color:#a1bcb4;font-size:13px;line-height:1.7;overflow-wrap:anywhere}.recording-info a{color:#b1f5dd}
+body.is-running .recording-info{display:none}
+body.is-running #fullscreenTask{display:none}
+body:not(.has-image) #taskTitle{margin:clamp(40px,12vh,130px) 0}
+@media(max-height:650px){body{padding:12px}.task-card{padding:14px 20px}.phase{margin-bottom:10px}.task-image{width:40vh;height:40vh}.controls{margin-top:12px}button{padding:8px 20px}#taskTitle{font-size:36px}.detail{margin:10px 0}}

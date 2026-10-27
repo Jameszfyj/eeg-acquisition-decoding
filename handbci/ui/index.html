@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="collection-token" content="__UI_TOKEN__">
+  <title>脑电采集 · 任务提示</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/cues.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header><div><span class="eyebrow">运动想象 / 数据采集</span><h1>脑电采集 · 任务提示</h1></div>
+    <div class="header-actions"><span id="sourceBadge" class="badge">正在加载设备配置</span>
+      <button id="fullscreen" class="quiet">全屏提示</button><button id="shutdown" class="quiet">关闭程序</button></div>
+  </header>
+  <main>
+    <section class="toolbar" aria-label="采集控制">
+      <div><span id="statusText" class="status">等待开始</span><p id="modeNote">请先在厂家软件开启数据转发，再核对设备配置并开始采集。</p></div>
+      <div class="buttons"><button id="start" class="primary">开始采集</button><button id="stop" class="danger" disabled>停止并保存</button></div>
+    </section>
+    <div id="errorBox" role="alert" hidden></div>
+    <section id="audioControls" class="audio-controls" aria-label="声音提示设置">
+      <div class="audio-options">
+        <label class="audio-toggle"><input id="audioEnabled" type="checkbox" checked>开启声音提示</label>
+        <label class="audio-volume">音量<input id="audioVolume" type="range" min="1" max="100" value="70"><output id="audioVolumeValue">70%</output></label>
+        <button id="audioTest" class="quiet">试听提示</button>
+      </div>
+      <p id="audioStatus" role="status">中文语音在本机生成；开始前请试听并确认扬声器音量。</p>
+      <p class="audio-flow">开始 → 休息时播报下一任务 → 滴声（0.4秒）开始想象 → 休息 → 重复 → 结束</p>
+      <p>开始后自动进入深色全屏；想象时仅显示任务名称，每轮结束后的休息时显示剩余轮数。按Esc返回操作界面，采集继续；中止时点击“停止并保存”。</p>
+    </section>
+    <section id="cueCard" class="cue-card" aria-label="被试任务提示">
+      <div class="cue-top"><span id="phaseName">准备就绪</span><span id="trialCounter">正在加载任务</span></div>
+      <div class="cue-content"><h2 id="cueTitle">采集前请放松</h2><p id="cueSubtitle">开始后，根据提示进行想象；手、脚和舌头保持放松，不实际运动。</p>
+        <div id="countdown" class="countdown" aria-label="剩余秒数">—</div><p id="timerLabel" class="timer-label">等待开始</p></div>
+      <progress id="phaseProgress" max="1" value="0" aria-label="当前阶段进度"></progress>
+    </section>
+    <section class="metrics" aria-label="采集状态">
+      <div><span>已接收时长</span><strong id="recordSeconds">0.0 秒</strong></div>
+      <div><span>每通道采样点</span><strong id="sampleCount">0</strong></div>
+      <div><span>数据配置</span><strong id="signalInfo">正在加载</strong></div>
+    </section>
+    <details id="settings" open>
+      <summary>采集设置与任务文字 <span>开始前可修改</span></summary>
+      <div class="settings-content">
+        <div class="form-grid"><label class="wide">数据来源<select id="profile"></select></label>
+          <label>被试编号<input id="participant" value="P01" maxlength="64"></label>
+          <label>采集轮数<input id="loops" type="number" min="1" max="100" step="1" value="1"></label>
+          <label>类别数量（2～6 类）<select id="classCount"><option value="2">2 类</option><option value="3">3 类</option><option value="4">4 类</option><option value="5">5 类</option><option value="6" selected>6 类</option></select></label>
+          <label>开始前静息 / 秒<input id="initialRest" type="number" min="0" max="120" step="0.5"></label>
+          <label>显示任务后准备 / 秒<input id="prepare" type="number" min="0" max="120" step="0.5"></label>
+          <label>每次想象 / 秒<input id="taskDuration" type="number" min="0.5" max="120" step="0.5"></label>
+          <label>每次休息 / 秒<input id="rest" type="number" min="0" max="120" step="0.5"></label>
+          <label>轮次间休息 / 秒<input id="blockRest" type="number" min="0" max="120" step="1"></label>
+        </div>
+        <fieldset class="trigger-settings">
+          <legend>事件标记 / TriggerBox</legend>
+          <div class="trigger-fields">
+            <label>标记方式<select id="markingMode"><option value="software">软件近似标记（未连接TriggerBox）</option><option value="network">TriggerBox · Wi-Fi / TCP（DCP）</option><option value="hardware">TriggerBox · USB串口</option></select></label>
+            <label id="serialPortField">TriggerBox串口<input id="triggerPort" list="triggerPorts" placeholder="例如 COM3" maxlength="16" autocomplete="off"><datalist id="triggerPorts"></datalist></label>
+            <label id="networkHostField" hidden>TriggerBox IP地址<input id="triggerHost" placeholder="例如 192.168.1.242" maxlength="15" autocomplete="off"></label>
+            <label id="networkPortField" hidden>DCP打标端口<input id="triggerTcpPort" type="number" min="1" max="65535" step="1" value="4321"></label>
+            <button id="refreshPorts" type="button" class="quiet">刷新串口</button>
+            <button id="readTriggerNetwork" type="button" class="quiet" hidden>读取厂家保存IP</button>
+            <button id="testTriggerBox" type="button" class="quiet">测试连接</button>
+          </div>
+          <p id="triggerStatus" class="hint" role="status">连接TriggerBox后，选择硬件触发并填写实际COM串口。</p>
+          <p class="hint">Wi-Fi模式需电脑连接设备所在网络，不需要互联网。这里连接的是DCP打标服务（手册示例4321）；4097是厂家设备管理接口，8712是脑电转发接口。厂家保存IP仅供核对，不能证明该型号支持DCP网络打标。</p>
+          <p class="hint">“测试连接”只读取设备名称，不发送事件。正式采集必须在脑电流中收到对应码，否则停止并保留未完成记录。TriggerBox与脑电系统的同步连接可因型号采用无线或配套线缆，按实机说明连接。</p>
+        </fieldset>
+        <p id="estimate" class="hint"></p>
+        <p class="hint">准备时间从任务名称显示时计算，默认2秒；若语音较长则等播完再响滴声。全屏准备和想象阶段显示同一文字，没有倒计时或进度条。</p>
+        <p class="hint">全屏采用深色背景；每轮包含下列所有任务各一次，完成一轮后在休息时显示剩余轮数。</p>
+        <div class="task-toolbar"><span class="hint">可修改类别数量，或逐项删除、添加；每轮包含当前列表中的每类任务各一次。</span><button id="addClass" class="quiet" type="button">新增类别</button></div>
+        <p class="hint">任务名称和说明均可编辑，实际类别及文字会保存在本次记录中。下列默认任务仅为示例，尚未验证识别效果。</p>
+        <div id="taskList" class="task-list"></div>
+        <div class="config-footer"><button id="importButton" class="quiet">导入设备配置 JSON</button><input id="importFile" type="file" accept=".json,application/json" hidden>
+          <span id="deviceDetails" class="hint"></span></div>
+      </div>
+    </details>
+    <section id="result" class="result" hidden>
+      <h2 id="resultTitle">采集完成</h2><p id="resultSummary"></p><p id="audioResult"></p><p id="triggerResult"></p>
+      <div class="table-wrap"><table><thead><tr><th>任务</th><th>完整试次</th></tr></thead><tbody id="resultRows"></tbody></table></div>
+      <label>保存位置<input id="resultPath" readonly></label>
+      <button id="copyPath" class="quiet">复制保存位置</button>
+      <p class="hint">原始信号：data.h5 · 事件标记：events.csv · 完整试次：trials.csv · 汇总：collection_report.json</p>
+    </section>
+    <footer>屏幕文字用于任务提示。模拟模式的信号和触发均由程序生成，不能作为真实脑电或识别效果的证明。</footer>
+  </main>
+  <section id="subjectView" class="subject-view" aria-label="被试静态提示" hidden>
+    <div id="subjectText" class="subject-text">休息</div>
+    <div id="subjectRounds" class="subject-rounds" hidden></div>
+  </section>
+</body>
+</html>

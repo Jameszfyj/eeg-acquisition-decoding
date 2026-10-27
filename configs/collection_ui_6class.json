@@ -1,0 +1,92 @@
+{
+  "description": "完整采集界面示例；六类运动想象任务尚未验证效果。信号与trigger均为人工模拟。",
+  "device": {
+    "source": "synthetic_tcp",
+    "sample_rate": 1000.0,
+    "stream_channels": 9,
+    "channels": [
+      "SYN01",
+      "SYN02",
+      "SYN03",
+      "SYN04",
+      "SYN05",
+      "SYN06",
+      "SYN07",
+      "SYN08"
+    ],
+    "unit": "synthetic_uV",
+    "host": "127.0.0.1",
+    "port": 18712
+  },
+  "preprocess": {
+    "output_rate": 250.0,
+    "lowpass_hz": 100.0,
+    "highpass_hz": 4.0,
+    "numtaps": 201,
+    "trim_seconds": 1.0
+  },
+  "window": {
+    "seconds": 2.0,
+    "stride_seconds": 0.5,
+    "task_offset_seconds": 0.5
+  },
+  "collection": {
+    "loops": 1,
+    "task_seconds": 4.0,
+    "rest_seconds": 2.0,
+    "initial_rest_seconds": 3.0,
+    "seed": 42,
+    "prepare_seconds": 2.0,
+    "block_rest_seconds": 15.0,
+    "tail_seconds": 1.0
+  },
+  "decision": {
+    "confidence": 0.7,
+    "margin": 0.15,
+    "stable_seconds": 0.3,
+    "update_seconds": 0.1,
+    "timeout_seconds": 10.0,
+    "max_attempts": 2
+  },
+  "network": {
+    "out_planes": 16
+  },
+  "classes": [
+    {
+      "id": 0,
+      "name": "left_hand_mi",
+      "task_text": "想象左手反复伸腕",
+      "action": "thumb"
+    },
+    {
+      "id": 1,
+      "name": "right_hand_mi",
+      "task_text": "想象右手反复伸腕",
+      "action": "index"
+    },
+    {
+      "id": 2,
+      "name": "both_hands_mi",
+      "task_text": "想象双手同时反复伸腕",
+      "action": "middle"
+    },
+    {
+      "id": 3,
+      "name": "both_feet_mi",
+      "task_text": "想象双脚同时反复抬脚尖",
+      "action": "ring"
+    },
+    {
+      "id": 4,
+      "name": "left_hand_right_foot_mi",
+      "task_text": "想象左手伸腕与右脚抬脚尖同时进行",
+      "action": "little"
+    },
+    {
+      "id": 5,
+      "name": "right_hand_left_foot_mi",
+      "task_text": "想象右手伸腕与左脚抬脚尖同时进行",
+      "action": "pinch"
+    }
+  ]
+}

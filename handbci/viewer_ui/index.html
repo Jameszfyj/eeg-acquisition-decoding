@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewer-token" content="__VIEWER_TOKEN__"><title>脑电波形 · 采集记录</title>
+<link rel="stylesheet" href="/styles.css"><script src="/app.js" defer></script></head>
+<body><main>
+<header><div><span class="eyebrow">采集记录 / 波形查看</span><h1>查看已采集的脑电</h1><p>选择一份已保存的 session，查看整段记录或某一次想象。</p></div><button id="shutdown" class="quiet">关闭查看器</button></header>
+<section class="panel selection"><div class="select-grid">
+<label>被试<select id="participant" aria-label="被试"></select></label>
+<label class="session-label">采集记录 / session<select id="session" aria-label="采集记录"></select></label>
+<button id="refresh" class="quiet">刷新记录列表</button></div><p id="empty" class="hint" hidden></p>
+</section>
+<div id="error" class="notice error" role="alert" hidden></div>
+<section id="record" hidden>
+<div id="notice" class="notice"></div>
+<section class="stats"><div><span>记录来源</span><strong id="source">—</strong></div><div><span>已保存时长</span><strong id="duration">—</strong></div><div><span>通道 / 采样率</span><strong id="channelsInfo">—</strong></div><div><span>记录状态</span><strong id="complete">—</strong></div></section>
+<section class="panel controls">
+<label>按 trial 定位<select id="trial" aria-label="按trial定位"></select></label>
+<div class="time-grid"><label>开始时间 / 秒<input id="start" type="number" min="0" step="0.1" value="0"></label><label>结束时间 / 秒<input id="end" type="number" min="0" step="0.1" value="10"></label><button id="draw">更新波形</button><button id="whole" class="quiet">查看整个session</button></div>
+<div class="pager"><button id="previous" class="quiet">上一段</button><button id="next" class="quiet">下一段</button><span id="status" role="status">请选择记录</span></div>
+<details><summary>选择显示通道 <span id="channelCount"></span></summary><div id="channelList" class="channel-list"></div><p class="hint">每次显示1～8路，可分批查看全部通道。</p></details>
+</section>
+<section class="panel graph"><div class="graph-heading"><strong>原始信号波形</strong><span id="unit"></span></div>
+<canvas id="waveform" role="img" aria-label="已保存脑电的多通道原始波形"></canvas>
+<p class="hint">每一行是一条通道，着色区间为任务标记。各通道纵轴自动分别缩放；波形可见不代表信号质量合格，也不能单凭曲线形状判断想象类别。</p>
+<div id="legend" class="legend"></div><p id="compression" class="hint"></p>
+</section>
+<section class="panel location"><label>原始记录文件夹<input id="path" readonly></label><button id="copy" class="quiet">复制文件夹位置</button><p id="marking" class="hint"></p></section>
+</section>
+<footer>查看器只读取已保存的数据，不连接脑电设备、不修改原始文件。采集结束后点击“刷新记录列表”。</footer>
+</main></body></html>

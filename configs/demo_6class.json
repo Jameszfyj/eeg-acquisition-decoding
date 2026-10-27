@@ -1,0 +1,87 @@
+{
+  "description": "人工六分类信号，仅验证流程，不能当作真实脑电或参赛模型。",
+  "device": {
+    "source": "synthetic",
+    "sample_rate": 1000.0,
+    "stream_channels": 9,
+    "channels": [
+      "SYN01",
+      "SYN02",
+      "SYN03",
+      "SYN04",
+      "SYN05",
+      "SYN06",
+      "SYN07",
+      "SYN08"
+    ],
+    "unit": "synthetic_uV"
+  },
+  "preprocess": {
+    "output_rate": 250.0,
+    "lowpass_hz": 100.0,
+    "highpass_hz": 4.0,
+    "numtaps": 201,
+    "trim_seconds": 1.0
+  },
+  "window": {
+    "seconds": 2.0,
+    "stride_seconds": 0.5,
+    "task_offset_seconds": 0.5
+  },
+  "collection": {
+    "loops": 3,
+    "task_seconds": 3.5,
+    "rest_seconds": 1.0,
+    "initial_rest_seconds": 2.0,
+    "seed": 42
+  },
+  "decision": {
+    "confidence": 0.7,
+    "margin": 0.15,
+    "stable_seconds": 0.3,
+    "update_seconds": 0.1,
+    "timeout_seconds": 10.0,
+    "max_attempts": 2
+  },
+  "network": {
+    "out_planes": 16
+  },
+  "classes": [
+    {
+      "id": 0,
+      "name": "synthetic_0",
+      "task_text": "人工演示类别1",
+      "action": "thumb"
+    },
+    {
+      "id": 1,
+      "name": "synthetic_1",
+      "task_text": "人工演示类别2",
+      "action": "index"
+    },
+    {
+      "id": 2,
+      "name": "synthetic_2",
+      "task_text": "人工演示类别3",
+      "action": "middle"
+    },
+    {
+      "id": 3,
+      "name": "synthetic_3",
+      "task_text": "人工演示类别4",
+      "action": "ring"
+    },
+    {
+      "id": 4,
+      "name": "synthetic_4",
+      "task_text": "人工演示类别5",
+      "action": "little"
+    },
+    {
+      "id": 5,
+      "name": "synthetic_5",
+      "task_text": "人工演示类别6",
+      "action": "pinch"
+    }
+  ]
+}

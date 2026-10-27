@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="online-token" content="__UI_TOKEN__">
+<title>脑电在线控制 · 被试与模型</title>
+<link rel="stylesheet" href="/styles.css"><script src="/app.js" defer></script>
+</head>
+<body>
+<header><div><span class="eyebrow">运动想象 / 实时解码</span><h1>脑电在线控制</h1></div>
+<div class="header-actions"><span id="sourceBadge" class="badge">等待选择模型</span><span class="badge">机械手 · 模拟输出</span><button id="fullscreen" class="quiet">全屏</button><button id="shutdown" class="quiet">关闭程序</button></div></header>
+<main>
+<section class="toolbar"><div><strong id="statusText">等待开始</strong><p id="modeNote">选择被试和模型，检查后即可开始。</p></div><div class="buttons"><button id="check">检查模型</button><button id="start" class="primary" disabled>开始在线解码</button><button id="stop" class="danger" disabled>停止并保存</button></div></section>
+<div id="errorBox" role="alert" hidden></div><div id="notice" class="notice" hidden></div>
+<section class="settings panel" aria-label="被试与模型设置">
+<div class="form-grid"><label>被试编号<select id="participant" aria-label="被试编号"></select></label><label class="wide">对应模型<select id="model" aria-label="对应模型"></select></label><label>判断次数<input id="trials" type="number" min="1" max="100" value="3"></label></div>
+<div class="source-row"><label>数据来源<select id="mode"><option value="simulated">本机 TCP 模拟 · 无需外设</option><option value="device">真实脑电设备</option></select></label><label id="simulationControl">模拟信号任务<select id="simulationTask" aria-label="模拟信号任务"></select></label><p id="modelInfo" class="hint">尚未加载模型</p></div>
+<details id="connection"><summary>连接与模型详情</summary><div class="connection-grid"><label>数据转发地址<input id="host" value="127.0.0.1"></label><label>数据端口<input id="port" type="number" min="1" max="65535" value="8712"></label><label class="wide">模型文件<input id="modelPath" readonly></label></div><p id="decisionInfo" class="hint"></p></details>
+</section>
+<section class="metrics" aria-label="实时运行状态"><div><span>接收时长</span><strong id="duration">0.0 秒</strong></div><div><span>每通道采样点</span><strong id="samples">0</strong></div><div><span>模型预测次数</span><strong id="predictions">0</strong></div><div><span>单次计算耗时</span><strong id="inference">—</strong></div></section>
+<section class="live-grid">
+<div class="prediction panel"><div class="card-heading"><span id="phaseText">模型就绪后开始</span><span id="trialText">等待开始</span></div><div class="prediction-content"><p class="overline">当前预测任务</p><h2 id="predictionTask">等待实时信号</h2><div class="confidence"><strong id="confidence">—</strong><span>模型预测概率</span></div><p id="decisionStatus" class="hint">预处理和预测会随新数据持续更新。</p></div><div class="command-summary"><div><span>最近输出的机械手指令</span><strong id="lastCommand">尚未输出</strong></div><span id="commandCount">0 条指令</span></div></div>
+<div class="probability panel"><div class="card-heading"><span id="probabilityTitle">六类预测概率</span><span id="updateHint">等待更新</span></div><div id="probabilityRows" class="probability-rows"></div><p class="hint probability-note">概率达到阈值并持续稳定后，才会在有效判断时间内输出一次指令。</p></div>
+</section>
+<section class="wave panel"><div class="card-heading"><span id="waveTitle">实时原始信号预览</span><span>最近约 5 秒 · 自动缩放</span></div><canvas id="waveform" aria-label="实时脑电信号波形" role="img"></canvas><p class="hint">波形来自正在接收的数据；此处仅作单通道预览，不代表信号质量已经合格。</p></section>
+<section class="panel command-log"><div class="card-heading"><span>输出指令记录</span><span>当前为模拟机械手</span></div><div class="table-wrap"><table><thead><tr><th>时间</th><th>判断</th><th>识别任务</th><th>机械手动作</th><th>预测概率</th></tr></thead><tbody id="commandRows"><tr><td colspan="5" class="empty">达到输出条件后，指令会显示在这里。</td></tr></tbody></table></div></section>
+<section id="result" class="panel result" hidden><h2 id="resultTitle">在线记录已保存</h2><p id="resultSummary"></p><label>保存位置<input id="resultPath" readonly></label><button id="copyPath">复制保存位置</button><p class="hint">原始信号 data.h5 · 预测 predictions.jsonl · 模拟指令 commands.jsonl · 本次模型 model_selection.json</p></section>
+<details class="panel import-panel" id="importPanel"><summary>导入其他被试或新版本的模型</summary><div class="import-content"><p class="hint">选择整理版训练得到的 .pt 文件。文件中的被试编号必须与这里填写的一致，模型将复制保存到比赛工程中。</p><div class="form-grid"><label>模型所属被试<input id="importParticipant" placeholder="例如 P02" maxlength="64"></label><label class="wide">版本名称<input id="importName" placeholder="例如 P02 · 第一次训练" maxlength="100"></label><label>模型文件<input id="modelFile" type="file" accept=".pt"></label></div><button id="importModel">导入并登记模型</button><p id="importMessage" class="hint"></p></div></details>
+<footer>在线使用已训练的个人模型，不会自动重新训练。人工模拟的类别差异由程序生成，不能作为真实脑电识别效果的证明。真实机械手通信与正式比赛的任务控制仍需接入。</footer>
+</main>
+</body></html>
