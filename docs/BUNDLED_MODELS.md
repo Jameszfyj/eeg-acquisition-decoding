@@ -1,6 +1,14 @@
 # 随附模型与校准数据
 
-从[2026-10-27 P01下载页](https://github.com/Jameszfyj/eeg-acquisition-decoding/releases/tag/p01-bundle-20261027)选择 `p01-models-20261027.zip`（模型和接入配置）或 `p01-models-and-calibration-20261027.zip`（另含两份完整校准记录），将内容解压到本项目根目录。
+从[2026-10-27 P01下载页](https://github.com/Jameszfyj/eeg-acquisition-decoding/releases/tag/p01-bundle-20261027)下载 `p01-models-20261027.zip`（约300KB，包含模型和接入配置），解压到本项目根目录。
+
+两份完整原始校准记录约393MB，以8个分卷提供。在项目根目录执行下面一条命令，自动下载、校验并还原到 `runtime/continuous/`，不覆盖已有模型设置：
+
+```powershell
+python examples/download_p01_data.py
+```
+
+也可把 `.zip.001` 至 `.zip.008` 下载到同一文件夹，再用7-Zip打开第一个分卷解压。分卷只是传输方式，合并后的ZIP及所有原始文件校验值保持不变。
 
 如果已有自己的 `configs/subject_models.json` 或 `configs/workbench.local.json`，先保留副本，再合并模型条目和本机设置。解压不会启动硬件。
 

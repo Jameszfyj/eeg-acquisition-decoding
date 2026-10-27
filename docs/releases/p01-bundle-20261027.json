@@ -21,7 +21,49 @@
   },
   "models_only": {
     "asset": "p01-models-20261027.zip",
-    "bytes": 299987,
-    "sha256": "a89566478369fff6b3dbd2fbeb7fa0c6ef3fca262bdbcd0ac23320426bdde336"
-  }
+    "bytes": 300188,
+    "sha256": "0e8f2cde6920d2378e76687e0c37ac28a345d066093e370f8d488cd3349fc90f"
+  },
+  "parts": [
+    {
+      "name": "p01-models-and-calibration-20261027.zip.001",
+      "bytes": 50331648,
+      "sha256": "48075b8c0570aa2160bf879fd600261d82a7550d4496ac5cb4d530cc054cba7e"
+    },
+    {
+      "name": "p01-models-and-calibration-20261027.zip.002",
+      "bytes": 50331648,
+      "sha256": "76fb9fd377ec6067d56ad6de46c863a7d9807752ee0880f490c75ddd6de2dbec"
+    },
+    {
+      "name": "p01-models-and-calibration-20261027.zip.003",
+      "bytes": 50331648,
+      "sha256": "af42c380b1e66f6bf30c509e580a2d4c234b2da990e3b10f66351c9b61f62f67"
+    },
+    {
+      "name": "p01-models-and-calibration-20261027.zip.004",
+      "bytes": 50331648,
+      "sha256": "23583e3e5c8dc0da8104a60b1a198ac44397113938df5ffc1684dc30273a5de4"
+    },
+    {
+      "name": "p01-models-and-calibration-20261027.zip.005",
+      "bytes": 50331648,
+      "sha256": "54d7047aa16d0de14e79e2729eb5b122798c5379b69c72bf0bcd1f13f40a5a04"
+    },
+    {
+      "name": "p01-models-and-calibration-20261027.zip.006",
+      "bytes": 50331648,
+      "sha256": "9ea7b7b4743fa5eaefd3254e54108ee05964fab5d50e0717bfc03102912ec652"
+    },
+    {
+      "name": "p01-models-and-calibration-20261027.zip.007",
+      "bytes": 50331648,
+      "sha256": "9b600fd0d7d27664e051b0d66a913860f4aede6c16c58dc42fbdebc470012b8d"
+    },
+    {
+      "name": "p01-models-and-calibration-20261027.zip.008",
+      "bytes": 40431177,
+      "sha256": "91f6235d6479cbc835d0938095da403e9edb347d6e13c38c836557a75ec31b51"
+    }
+  ]
 }
