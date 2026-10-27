@@ -101,6 +101,8 @@ class ImprovedSixClassDecoder:
         self.payload, self.models = payload, models
         self.stream = StreamPreprocessor(cfg)
         self.protocol = calibration_protocol(cfg)
+        from .shared_calibration import RawCalibrationData
+        self.raw_calibration = RawCalibrationData(cfg, self.protocol)
         self.rounds = self.protocol['rounds']
         self.total = self.protocol['trials']
         self.imagery_seconds = self.protocol['imagery_seconds']
@@ -130,6 +132,7 @@ class ImprovedSixClassDecoder:
 
     def recover_stream(self, first_source_index, reason):
         with self.lock:
+            self.raw_calibration.discard()
             self.stream_recovery_count += 1
             self.events.append(dict(kind='stream_interruption', reason=reason,
                 first_new_source_index=first_source_index, completed_trials_kept=self.completed,
@@ -151,6 +154,28 @@ class ImprovedSixClassDecoder:
         with self.lock:
             if self.latest_index != -1 or self.alignment is not None:
                 raise ValueError('只能在新连接接收脑电前载入上次校准。')
+            if saved.get('shared_raw'):
+                from .shared_calibration import SharedCalibrationStore
+                source = SharedCalibrationStore(saved['root']).load(saved['summary']['id'],
+                    self.raw_calibration.cfg, self.protocol, arrays=True)
+                if source['summary'] != saved['data_summary']:
+                    raise ValueError('共用校准数据发生变化，请重新选择。')
+                windows = []
+                # Replay raw EEG through this model's original preprocessing.
+                replay_stream = StreamPreprocessor(self.raw_calibration.cfg)
+                for raw, start in zip(source['raw'], source['starts']):
+                    replay_stream.reset(int(start))
+                    values, indices = replay_stream.process(raw, np.arange(start,start+raw.shape[1]))
+                    logical = indices-replay_stream.delay_seconds*replay_stream.fs
+                    for offset in (.6, 1., 1.4):
+                        first = int(np.searchsorted(logical,start+offset*replay_stream.fs))
+                        if first+500 > len(indices) or indices[first]-1000 < start:
+                            raise ValueError('共用校准缺少原模型所需完整窗口。')
+                        windows.append(values[SCALP, first:first+500])
+                windows = self._notched(np.stack(windows))
+                alignment, info = fit_alignment(windows, n_trials=self.total)
+                saved = dict(saved, windows=windows, alignment=alignment, info=info,
+                    task_labels=source['labels'], hand_bias=self._hand_bias_from(windows,source['labels']))
             restored_bias = None
             if self.hand_supervised:
                 from .labelled_hand_calibration import validate_labels
@@ -258,6 +283,7 @@ class ImprovedSixClassDecoder:
             self._prompt('imagery')
             return
         self.windows.extend(self._trial_windows())
+        self.raw_calibration.finish(self.tasks[self.completed], self.started_index)
         self.events.append(dict(kind='task_end', trial=self.completed+1,
             source_index=self.latest_index+1, physical_event_time_verified=False))
         self.completed += 1
@@ -320,6 +346,8 @@ class ImprovedSixClassDecoder:
 
     def process(self, raw, indices):
         with self.lock:
+            if self.alignment is None and self.phase == 'imagery':
+                self.raw_calibration.append(raw, indices, self.started_index)
             values, retained = self.stream.process(raw, indices)
             self.latest_index = int(indices[-1])
             keep = max(2000, int((self.imagery_seconds+2)*self.stream.output_fs))
@@ -360,3 +388,5 @@ class ImprovedSixClassDecoder:
                 np.savez_compressed(session/'calibration_arrays.npz', windows=np.stack(self.windows),
                     alignment=self.alignment if self.alignment is not None else np.empty((0, 0)),
                     task_labels=np.asarray(self.tasks[:self.completed],dtype=np.int64))
+            if complete and not self.reused_from:
+                self.raw_calibration.save(session)

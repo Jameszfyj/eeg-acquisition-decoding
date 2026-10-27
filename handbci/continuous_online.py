@@ -400,6 +400,16 @@ class ContinuousController(OnlineController):
                     "model": "无需模型；概率由演示程序生成"}
         details = super().model_details(participant, model_id)
         details["classes"] = self.display_classes(details["classes"])
+        if details['source'] == 'neuracle_acp':
+            from .shared_calibration import SharedCalibrationStore, imported_protocol
+            selection, cfg = prepare_subject_model(participant, model_id, registry=self.registry)
+            protocol = imported_protocol(cfg)
+            history = SharedCalibrationStore(self.output_root).history(cfg, protocol)
+            details.update(requires_prompted_calibration=True, calibration_rounds=protocol['rounds'],
+                calibration_trials=protocol['trials'],calibration_imagery_seconds=protocol['imagery_seconds'],
+                calibration_rest_seconds=protocol['rest_seconds'],calibration_history=history['available'],
+                unavailable_calibrations=history['unavailable'],
+                previous_calibration=history['available'][0] if history['available'] else None)
         return details
 
     @staticmethod
@@ -499,6 +509,28 @@ class ContinuousController(OnlineController):
                 if cfg["device"]["port"] == 8712:
                     raise ValueError("8712不是ACP端口。")
             classes = self.display_classes(cfg["classes"], request.get("actions"), request.get("hand_actions"))
+            needs_calibration = mode == 'acp' and (request.get('session_purpose') == 'calibration'
+                or request.get('prompted', {}).get('enabled')
+                or (request.get('calibration_mode') == 'reuse' and request.get('calibration_source')))
+            if needs_calibration:
+                from .shared_calibration import SharedCalibrationStore, imported_protocol
+                protocol = imported_protocol(cfg)
+                selection.update(requires_calibration=True, imported_calibration=True,
+                    calibration_rounds=protocol['rounds'], calibration_trials=protocol['trials'],
+                    calibration_method='model_specific_logit_bias_v1',backbone_updated=False)
+                cfg['session_metadata']['brain_calibration'] = protocol
+                calibration_mode = request.get('calibration_mode', 'new')
+                if calibration_mode not in ('new','reuse'):
+                    raise ValueError('请选择重新校准或使用完整校准数据。')
+                selection['calibration_mode'] = calibration_mode
+                if calibration_mode == 'reuse':
+                    saved = SharedCalibrationStore(self.output_root).load(request.get('calibration_source'),cfg,protocol)
+                    selection['calibration_reuse'] = saved['summary']
+                    cfg['session_metadata']['calibration_reuse'] = saved['summary']
+                sound = request.get('calibration_audio',False)
+                if not isinstance(sound,bool):
+                    raise ValueError('校准语音设置须为开关。')
+                cfg['session_metadata']['calibration_audio_enabled'] = sound and calibration_mode == 'new'
         settings = request.get("decision", {})
         if not isinstance(settings, dict):
             raise ValueError("判决设置格式无效。")
@@ -668,7 +700,7 @@ class ContinuousController(OnlineController):
         payload.update(calibration_mode='new', session_purpose='calibration',
                        output={'mode':'simulation'}, prompted={'enabled':False})
         selection, cfg, classes, gate, mode = self.prepare(payload)
-        if mode != 'six' or not selection.get('requires_calibration'):
+        if mode not in ('six','acp') or not selection.get('requires_calibration'):
             raise ValueError('当前模型不需要脑电校准，可直接点击开始解码。')
         return self.start(payload)
 
@@ -706,6 +738,8 @@ class ContinuousController(OnlineController):
                     raise ValueError('独立任务窗口仅用于开始解码。')
             if purpose not in ('legacy','calibration','decode'):
                 raise ValueError('未知会话用途。')
+            if purpose != 'calibration' and selection.get('requires_calibration') and not selection.get('calibration_reuse'):
+                raise ValueError('请先完成或选用完整校准，再开始解码。')
             if purpose == 'calibration' and (request.get('output',{}).get('mode','simulation') != 'simulation'
                                             or request.get('prompted',{}).get('enabled')):
                 raise ValueError('脑电校准会话不允许启用机械手或TriggerBox任务采集。')
@@ -750,10 +784,10 @@ class ContinuousController(OnlineController):
                           "phase": "warming", "inference_ms": None, "report": None,
                           "calibration": {"required": bool(selection.get('requires_calibration')),
                               "ready": bool(selection.get('calibration_reuse')),
-                              "completed": 18 if selection.get('calibration_reuse') else 0,
+                              "completed": selection.get('calibration_trials',18) if selection.get('calibration_reuse') else 0,
                               "reused": bool(selection.get('calibration_reuse')),
                               "reused_from": selection.get('calibration_reuse'),
-                              "total": 18, "phase": "warming"},
+                              "total": selection.get('calibration_trials',18), "phase": "warming"},
                           "mode": mode, "classes": classes, "selection": selection, "gate": gate.state,
                           "decision_settings": gate.settings(),
                           "prompted": dict(prompted, phase='connecting') if prompted['enabled'] else prompted,
@@ -795,6 +829,12 @@ class ContinuousController(OnlineController):
             if self.state['running']:
                 raise ValueError('请先停止当前会话，再准备或试听语音。')
         allowed = ['开始', '休息', '结束', '校准完成', '拇指', '食指', '中指', '无名指', '小指', 'OK手势'] + NAMES
+        for entry in super().models():
+            try:
+                _, cfg = prepare_subject_model(entry['participant_id'],entry['model_id'],registry=self.registry)
+                allowed.extend(c.get('task_text') or c['name'] for c in cfg['classes'])
+            except (OSError,ValueError,KeyError,RuntimeError,EOFError):
+                continue
         requested = request.get('texts')
         if not isinstance(requested, list) or any(text not in allowed for text in requested):
             raise ValueError('提示语音文字不匹配。')
@@ -1127,6 +1167,18 @@ class ContinuousController(OnlineController):
         else:
             payload, model = load_model(selection["model"], "cpu")
             decoder = OnlineDecoder(payload, model)
+        if selection.get('imported_calibration'):
+            from .shared_calibration import ImportedCalibrationDecoder, SharedCalibrationStore, imported_protocol
+            decoder = ImportedCalibrationDecoder(decoder,cfg,selection)
+            reuse = cfg['session_metadata'].get('calibration_reuse')
+            if reuse:
+                saved = SharedCalibrationStore(self.output_root).load(reuse['id'],cfg,imported_protocol(cfg),arrays=True)
+                if saved['summary'] != reuse:
+                    raise ValueError('共用校准数据发生变化，请重新选择。')
+                decoder.restore_calibration(saved)
+            with self.condition:
+                self.calibration_decoder = decoder
+                self.state['calibration'] = decoder.snapshot_calibration()
         from .receiver_access import ReceiverLease
         lease = ReceiverLease(cfg["device"]["host"], cfg["device"]["port"]) if mode in ('acp','four','six') else nullcontext()
         try:

@@ -53,6 +53,12 @@ class CalibrationStore:
         source = (self.root/session_id).resolve()
         if source.parent != self.root:
             raise ValueError('校准记录不在本工作台目录中。')
+        if (source/'calibration_data.json').is_file():
+            from .shared_calibration import SharedCalibrationStore
+            shared = SharedCalibrationStore(self.root).load(session_id, cfg, protocol)
+            return dict(summary=dict(shared['summary'], model_id=selection['model_id'],
+                        model_sha256=selection['sha256']), data_summary=shared['summary'],
+                        shared_raw=True, root=str(self.root))
         try:
             record = json.loads((source/'model_selection.json').read_text(encoding='utf-8'))
             calibration = json.loads((source/'calibration.json').read_text(encoding='utf-8'))

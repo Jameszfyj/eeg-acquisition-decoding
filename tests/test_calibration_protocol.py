@@ -30,7 +30,7 @@ class CalibrationProtocolTests(unittest.TestCase):
         cfg['device'].update(sample_rate=1000, unit='uV')
         cfg['preprocess'] = dict(output_rate=250., lowpass_hz=100., highpass_hz=4., numtaps=201, trim_seconds=1.)
         cfg['window']['seconds'] = 2.
-        cfg.setdefault('session_metadata', {}).update(hand_supervised_calibration=True,
+        cfg.setdefault('session_metadata', {}).update(participant_id='S01',hand_supervised_calibration=True,
             brain_calibration=dict(rounds=20, imagery_seconds=6., rest_seconds=2.))
         return cfg
 
@@ -72,6 +72,7 @@ class CalibrationProtocolTests(unittest.TestCase):
             decoder._prompt('imagery')
             decoder.acknowledge(decoder.prompt_id, decoder.session_id)
             start = decoder.started_index
+            decoder.raw_calibration.append(rng.normal(size=(32,6000)).astype(np.float32),np.arange(start,start+6000),start)
             decoder._trial_windows = lambda trial=trial: windows[trial*3:trial*3+3]
             decoder.latest_index = start+5998
             decoder._calibrate_step()
@@ -89,19 +90,23 @@ class CalibrationProtocolTests(unittest.TestCase):
             session_id = '20260101_120000_1234abcd_S01'
             session = Path(root)/session_id
             session.mkdir()
-            decoder.save_calibration(session)
             selection = dict(participant_id='S01', model_id='test-model', sha256='test-digest',
                              hand_supervised_calibration=True)
             (session/'model_selection.json').write_text(json.dumps(dict(selection, config=cfg)), encoding='utf-8')
             device = dict(info=dict(type='test', serial='example', cap='test-cap', labels_verified=True),
                           labels=cfg['device']['channels'], settings=dict(fs=1000), unit='uV')
             (session/'device.json').write_text(json.dumps(device), encoding='utf-8')
+            decoder.save_calibration(session)
             saved = CalibrationStore(root).load(session_id, selection, cfg)
             self.assertEqual(saved['summary']['calibration_trials'], 120)
             restored = self.decoder(cfg)
             restored.restore_calibration(saved)
             self.assertTrue(restored.snapshot_calibration()['ready'])
             self.assertEqual(restored.completed, 120)
+            other = dict(selection,model_id='another-model',sha256='another-digest')
+            shared = CalibrationStore(root).load(session_id,other,cfg)
+            self.assertTrue(shared['shared_raw'])
+            self.assertEqual(shared['summary']['model_id'],'another-model')
             old_cfg = copy.deepcopy(cfg)
             old_cfg['session_metadata'].pop('brain_calibration')
             with self.assertRaises(ValueError):

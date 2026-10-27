@@ -306,6 +306,7 @@ async function loadDetails(){
   try{
     const next=await api(`/api/model?participant=${encodeURIComponent($('participant').value)}&model_id=${encodeURIComponent($('model').value)}`);
     if(revision!==selectionRevision)return;
+    if(next.requires_prompted_calibration&&$('collectionMode').value==='prompted')next.requires_calibration=true;
     if(next.requires_calibration&&!Object.hasOwn(next,'previous_calibration'))throw new Error('后台正在更新，暂时无法读取校准记录，请稍后刷新。');
     details=next;
     if(!state?.running&&appliedDefaultsModel!==details.model_id){
@@ -381,7 +382,7 @@ function calibrationChoiceChanged(){
   if(details?.requires_calibration){
     const labelled=!!details.hand_supervised_calibration;
     const title=details.name||(labelled?'六组模型 · 有标签校准（实验）':'改进模型 · IFNet＋脚舌复判');
-    const timing=`${calibrationRounds()}轮，每轮6类，共${calibrationTotal()}次；每次想象${details.calibration_imagery_seconds||4}秒，休息${details.calibration_rest_seconds||3}秒。`;
+    const timing=`${calibrationRounds()}轮，每轮${classes.length}类，共${calibrationTotal()}次；每次想象${details.calibration_imagery_seconds||4}秒，休息${details.calibration_rest_seconds||3}秒。`;
     text('brainCalibrationHint',usesPreviousCalibration()?`使用上次已完成的${calibrationTotal()}次校准，无需再执行任务。`:timing+(details.right_hand_review?'按提示想象动作，完成后启用右手复核。':labelled?'':'按提示进行运动想象。'));
     text('modelMeta',title+'\n'+(usesPreviousCalibration()?'完整校准已就绪，点击下方开始解码。':'先点击开始校准，完成后再单独开始解码。')+(labelled?'\n实验功能，在线改善尚未验证。':''));
     text('contextNote',usesPreviousCalibration()?title+' · 校准已就绪 · 等待开始解码':title+' · 先校准 · 完成后待命');
@@ -917,7 +918,7 @@ async function init(){try{models=await api('/api/models');const initial=await ap
 for(const id of ['decisionMode','voteWindow','voteRatio','decisionTimeout'])$(id).addEventListener('change',decisionFields);
 $('cooldown').addEventListener('change',()=>{syncPromptTiming('cooldown');decisionFields();});
 for(const id of ['promptRest','promptPrepare'])$(id).addEventListener('change',()=>syncPromptTiming('parts'));
-$('collectionMode').addEventListener('change',()=>{if($('collectionMode').value==='prompted'){$('decisionMode').value='vote';syncPromptTiming('parts');}promptedFields();decisionFields();updateControls();searchTriggerDevices();});
+$('collectionMode').addEventListener('change',()=>{if($('collectionMode').value==='prompted'){$('decisionMode').value='vote';syncPromptTiming('parts');}promptedFields();decisionFields();if(details?.requires_prompted_calibration)loadDetails();updateControls();searchTriggerDevices();});
 $('promptMarking').addEventListener('change',()=>{promptedFields();updateControls();searchTriggerDevices();});
 init();
 
