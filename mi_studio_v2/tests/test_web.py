@@ -34,7 +34,9 @@ def test_health_and_path_confinement(tmp_path):
     try:
         status, data = _request(base + "/api/health")
         assert status == 200 and data["ok"] and data["output_count"] == 6
-        status, data = _request(base + "/api/scan", "POST", {"path": "F:/Windows"})
+        outside = tmp_path.parent / (tmp_path.name + "-outside")
+        outside.mkdir()
+        status, data = _request(base + "/api/scan", "POST", {"path": str(outside)})
         assert status == 400 and "允许" in data["error"]
     finally:
         server.shutdown()
