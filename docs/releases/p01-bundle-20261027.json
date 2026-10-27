@@ -12,12 +12,13 @@
   ],
   "calibration_tasks_per_session": 120,
   "validation": {
-    "platform_tests_passed": 115,
+    "platform_tests_passed": 117,
     "tool_tests_passed": 29,
     "tool_tests_skipped": 2,
     "clean_checkout_loaded": true,
     "file_hashes_verified": true,
-    "physical_device_online_validated": false
+    "physical_device_online_validated": false,
+    "public_part_download_verified": true
   },
   "models_only": {
     "asset": "p01-models-20261027.zip",
