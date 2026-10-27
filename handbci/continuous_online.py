@@ -351,7 +351,7 @@ class ContinuousController(OnlineController):
         from .six_class_online import SIX_MODEL_IDS
         calibration = calibration_defaults()
         saved_path = local_path('hand_calibration', ROOT/'configs/hand_calibration_P01_20261024.json')
-        personal_six=participant=='P01' and (model_id in SIX_MODEL_IDS or details.get('runtime') in ('retrained_six','mi_studio_v2'))
+        personal_six=participant=='P01' and (model_id in SIX_MODEL_IDS or details.get('runtime') in ('retrained_six','mi_studio_v2') or details.get('native_platform_ifnet'))
         if personal_six and saved_path.is_file():
             saved = json.loads(saved_path.read_text(encoding='utf-8-sig'))
             if (saved.get('participant_id') == participant
@@ -401,6 +401,11 @@ class ContinuousController(OnlineController):
                     "model": "无需模型；概率由演示程序生成"}
         details = super().model_details(participant, model_id)
         details["classes"] = self.display_classes(details["classes"])
+        if details.get('embedded_calibration_ready'):
+            details.update(requires_prompted_calibration=False,
+                input_note='ONNX已包含经输出层核对的校准偏置；按准备提示对齐2秒窗口，直接使用内置校准。',
+                calibration_history=[],unavailable_calibrations=[],previous_calibration=None)
+            return details
         if details.get('runtime')=='mi_studio_v2':
             details.update(input_note='v2按准备提示对齐2秒窗口；专用校准头已载入，实时预测不使用目标标签。',
                 calibration_history=[],unavailable_calibrations=[],previous_calibration=None)
@@ -526,6 +531,10 @@ class ContinuousController(OnlineController):
                 if request.get('session_purpose')=='calibration':
                     raise ValueError('v2模型使用专用特征分类头校准，请打开MI Studio v2。')
                 needs_calibration=False
+            if selection.get('embedded_calibration_ready'):
+                if request.get('session_purpose')=='calibration' or (request.get('calibration_mode')=='reuse' and request.get('calibration_source')):
+                    raise ValueError('此ONNX已内置校准偏置；若需重新校准，请选择对应的源模型。')
+                needs_calibration=False
             if needs_calibration:
                 from .shared_calibration import SharedCalibrationStore, imported_protocol
                 protocol = imported_protocol(cfg)
@@ -551,7 +560,14 @@ class ContinuousController(OnlineController):
         settings = request.get("decision", {})
         if not isinstance(settings, dict):
             raise ValueError("判决设置格式无效。")
-        decision_mode = settings.get('mode', 'vote' if mode == 'six' else 'stable')
+        settings = {**local_settings().get('decision_defaults', {}), **settings}
+        stride = local_settings().get('prediction_stride_seconds', selection.get('prediction_stride_seconds', .1))
+        if cfg is not None and stride is not None:
+            stride = number(stride, '在线预测步长', .02, 1.)
+            cfg.setdefault('session_metadata', {}).setdefault('model_stride_seconds', cfg['window']['stride_seconds'])
+            cfg['window']['stride_seconds'] = stride
+            selection['prediction_stride_seconds'] = stride
+        decision_mode = settings.get('mode', 'stable' if mode == 'four' else 'vote')
         if decision_mode == 'vote':
             gate = VotingGate(len(classes), **{k: settings[k] for k in
                               ('vote_window_seconds', 'vote_ratio', 'decision_timeout_seconds',
@@ -574,7 +590,7 @@ class ContinuousController(OnlineController):
             load_checkpoint(selection['model'], selection['sha256'])
         elif selection.get('runtime') == 'onnx':
             from .model_bundle import ONNXDecoder
-            ONNXDecoder(selection['model'])
+            ONNXDecoder(selection['model'], prediction_stride_seconds=cfg['window']['stride_seconds'])
         elif selection.get('runtime')=='retrained_six':
             from .retrained_runtime import load_portable
             load_portable(selection['model'],selection['sha256'])
@@ -1189,12 +1205,14 @@ class ContinuousController(OnlineController):
             decoder = StudioV2Decoder(selection['model'],cfg,selection['sha256'])
         elif selection.get('runtime') == 'onnx':
             from .model_bundle import ONNXDecoder
-            decoder = ONNXDecoder(selection['model'])
+            decoder = ONNXDecoder(selection['model'], prediction_stride_seconds=cfg['window']['stride_seconds'])
         elif selection.get('runtime')=='retrained_six':
             from .retrained_runtime import RetrainedStreamDecoder
             decoder=RetrainedStreamDecoder(selection['model'],cfg,selection['sha256'])
         else:
             payload, model = load_model(selection["model"], "cpu")
+            payload = dict(payload, config=copy.deepcopy(payload['config']))
+            payload['config'].setdefault('decision', {})['update_seconds'] = cfg['window']['stride_seconds']
             decoder = OnlineDecoder(payload, model)
         if selection.get('imported_calibration'):
             from .shared_calibration import ImportedCalibrationDecoder, SharedCalibrationStore, imported_protocol
@@ -1350,6 +1368,7 @@ class ContinuousController(OnlineController):
         initialization_end_source, decoder_started = None, False
         timing = ReceiveTiming(cfg['device']['sample_rate'])
         recovery = StreamRecovery(len(cfg['device']['channels']),5)
+        waiting_for_stream, waiting_reason, waiting_samples = False, '', 0
         def packet(p):
             nonlocal received_origin_ms, latest_source
             if p.kind == "eeg":
@@ -1376,16 +1395,30 @@ class ContinuousController(OnlineController):
             while not protocol_events.empty():
                 protocol_log.write(json.dumps(protocol_events.get_nowait(), ensure_ascii=False)+'\n')
             protocol_log.flush()
+        def wait_for_stream(reason):
+            nonlocal waiting_for_stream, waiting_reason, waiting_samples
+            if waiting_for_stream:
+                return
+            waiting_for_stream, waiting_reason, waiting_samples = True, reason, 0
+            self.eeg_fault_active.set()
+            gate.reset_candidate()
+            if prompted is not None:
+                with self.condition:
+                    prompted.suspend_stream(reason)
+                    self.state['prompted'] = prompted.snapshot()
+            protocol_events.put(dict(kind='stream_wait', detail=dict(reason=reason),
+                                     wall_ns=time.time_ns(), mono_ns=time.monotonic_ns()))
+            with self.condition:
+                self.state.update(phase='waiting_stream', probabilities=[],
+                    gate=dict(candidate=None, progress=0., reason='脑电暂缓 · 保持连接并暂停动作'))
         def check_protocol_faults():
             flush_protocol_events()
             while not faults.empty():
                 fault = faults.get_nowait()
                 if isinstance(fault, dict) and fault['kind'] == 'crc_error':
-                    if self.prompted_settings['enabled']:
-                        raise RuntimeError('带提示控制采集收到CRC异常，已停止并保留原始数据和未完成试次。')
                     if hasattr(decoder,'recover_stream'):
                         recovery.request(fault['detail'])
-                        gate.reset_candidate()
+                        wait_for_stream('CRC校验失败；当前试次中断，等待新的有效脑电')
                         with self.condition:
                             self.state.update(phase='recovering_stream',
                                 gate=dict(candidate=None,progress=0.,reason='CRC异常 · 隔离数据并等待新窗口'))
@@ -1505,7 +1538,10 @@ class ContinuousController(OnlineController):
                                 stale = snapshot['last_arrival_age_seconds']
                                 stale = stale if stale is not None else time.monotonic()-origin
                                 with self.condition:self.state['stale_seconds'] = stale
-                                if stale > 1:raise RuntimeError('超过1秒没有新脑电，已停止。')
+                                if stale > 1:
+                                    wait_for_stream('脑电接收暂停超过1秒')
+                                if stale > 4:
+                                    raise RuntimeError('连续4秒没有有效脑电，连接未恢复，已停止并保存。')
                                 continue
                             check_protocol_faults()
                             fs = adapter.settings['fs']
@@ -1533,7 +1569,8 @@ class ContinuousController(OnlineController):
                                         if hasattr(decoder,'snapshot_calibration'):
                                             self.state['calibration']=decoder.snapshot_calibration()
                                     previous=None
-                                    self.eeg_fault_active.clear()
+                                    if not waiting_for_stream:
+                                        self.eeg_fault_active.clear()
                                 else:
                                     pending.append((p,arrival));pending_samples += p.counts.shape[1]
                                     previous=p
@@ -1549,6 +1586,42 @@ class ContinuousController(OnlineController):
                             previous = p
                             if pending_samples < batch_samples:continue
                             raw,ix = persist_pending()
+                            snapshot = timing.snapshot(index)
+                            if snapshot['backlog_seconds'] > timing.max_backlog:
+                                wait_for_stream('脑电接收积压；保留数据并等待实时位置')
+                            if waiting_for_stream:
+                                # Archive every verified sample, but never send
+                                # transport backlog to the model or hand driver.
+                                waiting_samples += len(ix)
+                                with self.condition:
+                                    self.state.update(samples_received=index, wall_seconds=time.monotonic()-origin,
+                                        stream_timing=snapshot, stale_seconds=snapshot['last_arrival_age_seconds'] or 0.)
+                                    self.waveform_preview.append(raw[order] if named_stream else raw, ix)
+                                if snapshot['queued_samples'] > 0:
+                                    continue
+                                if recovery.pending:
+                                    continue
+                                if hasattr(decoder, 'recover_stream'):
+                                    decoder.recover_stream(int(ix[-1])+1, waiting_reason)
+                                else:
+                                    decoder.reset(int(ix[-1])+1)
+                                gate.reset_candidate();rates.clear()
+                                timing.restart_observation()
+                                if prompted is not None:
+                                    with self.condition:
+                                        prompted.resume_stream()
+                                        self.state['prompted'] = prompted.snapshot()
+                                protocol_events.put(dict(kind='stream_resumed', detail=dict(
+                                    reason=waiting_reason, first_fresh_source_index=int(ix[-1])+1,
+                                    archived_without_inference=waiting_samples, repaired_samples=0),
+                                    wall_ns=time.time_ns(), mono_ns=time.monotonic_ns()))
+                                waiting_for_stream = False
+                                if faults.empty():
+                                    self.eeg_fault_active.clear()
+                                with self.condition:
+                                    self.state.update(phase='warming', probabilities=[],
+                                        gate=dict(candidate=None,progress=0.,reason='连接已恢复 · 重新积累完整窗口'))
+                                continue
                             if initialization_end_source is not None and not decoder_started:
                                 if int(ix[-1]) <= initialization_end_source:
                                     with self.condition:

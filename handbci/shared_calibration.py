@@ -257,6 +257,11 @@ class ImportedCalibrationDecoder:
                 stream_recovery_count=self.stream_recovery_count, reused=self.reused_from is not None,
                 reused_from=self.reused_from, physical_event_time_verified=False)
 
+    def set_prompt_anchor(self, source_index):
+        with self.lock:
+            if self.bias is not None and hasattr(self.base,'set_prompt_anchor'):
+                self.base.set_prompt_anchor(source_index)
+
     def _prompt(self, phase):
         self.phase, self.started_index = phase, None
         self.prompt_id, self.prompt_created = uuid.uuid4().hex, time.monotonic()

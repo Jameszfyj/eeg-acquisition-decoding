@@ -449,6 +449,27 @@ class Link:
             frame = bytes(buf[:total])
             calculated_crc = frame_crc(frame)
             received_crc = struct.unpack_from('<H', frame, total - 4)[0]
+            expected_tail = TAIL_HELLO if token == TOKEN_HELLO else TAIL_CMD
+            if (calculated_crc != received_crc
+                    or struct.unpack_from('<H', frame, total-2)[0] != expected_tail):
+                # Some receive streams contain an exact partial EEG prefix,
+                # followed by the same entire frame. Accept only the entire,
+                # independently verified frame; retain the redundant wire bytes
+                # as evidence. Never join fragments or bypass CRC checks.
+                prefix = self._duplicate_eeg_prefix(frame, total)
+                if prefix is None:
+                    return  # bounded lookahead, independent of TCP recv splits
+                if prefix:
+                    self.on_event('duplicate_prefix', {
+                        'discarded_bytes': prefix, 'candidate_length': total,
+                        'candidate_stream_offset': self._rx_total-len(buf),
+                        'prefix_hex': bytes(buf[:prefix]).hex(),
+                        'verified_frame_hex': bytes(buf[prefix:prefix+total]).hex(),
+                        'raw_receive_tail_start': self._rx_total-len(self._rx_tail),
+                        'raw_receive_tail_hex': bytes(self._rx_tail).hex(),
+                        'repaired_samples': 0})
+                    del buf[:prefix]
+                    continue
             if calculated_crc != received_crc:
                 self.on_event('crc_error', {'discarded_bytes': 1,
                     'candidate_length': total, 'header_length': header_len,
@@ -461,7 +482,6 @@ class Link:
                     'raw_receive_tail_hex': bytes(self._rx_tail).hex()})
                 del buf[0]
                 continue
-            expected_tail = TAIL_HELLO if token == TOKEN_HELLO else TAIL_CMD
             if struct.unpack_from('<H', frame, total-2)[0] != expected_tail:
                 self.on_event('tail_error', {'discarded_bytes': 1})
                 del buf[0]
@@ -472,6 +492,25 @@ class Link:
                 continue
             del buf[:total]
             self._dispatch(frame, now_ns)
+
+    def _duplicate_eeg_prefix(self, frame: bytes, total: int) -> Optional[int]:
+        if frame[:3] != b'\xf0\x0f\x11' or frame[5:7] != b'\x03\x02':
+            return 0
+        buf = self._buf
+        for offset in range(17, total):
+            available = min(len(buf)-offset, total)
+            if buf[offset:offset+min(3, available)] != frame[:min(3, available)]:
+                continue
+            compared = min(offset, available)
+            if buf[:compared] == buf[offset:offset+compared]:
+                if available < total:
+                    return None
+                following = bytes(buf[offset:offset+total])
+                if (following[:17] == frame[:17]
+                        and frame_crc(following) == struct.unpack_from('<H', following, total-4)[0]
+                        and following[-2:] == b'\x0f\xf0'):
+                    return offset
+        return 0
 
     def _dispatch(self, frame: bytes, now_ns: int) -> None:
         pkg = frame[5]

@@ -85,5 +85,20 @@ class StudioV2RuntimeTests(unittest.TestCase):
         decoder.recover_stream(5000,'gap')
         self.assertIsNone(decoder.process(np.ones((32,1000)),np.arange(5000,6000)))
 
+    def test_configured_tenth_second_stride_is_used_in_both_modes(self):
+        cfg=self.config();cfg['window']['stride_seconds']=.1
+        for prompted in (False,True):
+            with patch('handbci.studio_v2_runtime.load_source',return_value=(FakeSource(),None)):
+                decoder=StudioV2Decoder('unused.pt',cfg)
+            if prompted:decoder.set_prompt_anchor(1000)
+            starts=[]
+            for start in range(0,7000,20):
+                value=decoder.process(np.ones((32,20)),np.arange(start,start+20))
+                if value is not None:
+                    starts.append(decoder.last_window['model_start_index'])
+                    self.assertLessEqual(decoder.last_window['source_end_index'],start+19)
+            self.assertGreater(len(starts),30)
+            np.testing.assert_array_equal(np.diff(starts),100)
+
 
 if __name__=='__main__':unittest.main()

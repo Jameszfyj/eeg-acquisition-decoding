@@ -63,6 +63,10 @@ with open("manifest.json", "w", encoding="utf-8") as f:
 
 ## 输入和预处理约定
 
+平台原生IFNet导出的 `studio.arm=B_platform_native`、`l100d250h4_pre_v2` ONNX包支持按准备提示建立2秒窗口网格。原模型清单的网格步长为0.5秒，实时工作台默认以0.1秒滑动预测，沿用清单内的逐通道标准化和平台双频带处理。新提示会重置窗口网格，实时推理只使用已经到达的数据。
+
+若该格式包含 `handbci.shared_calibration.fit_bias` 校准声明，平台还会核对ONNX输出层实际叠加的偏置。声明、常量和任务数一致的已校准包可直接解码，避免再次叠加通用校准；需要重新校准时应选择相应源模型。未内置校准的源模型和合并训练模型继续沿用提示解码前20轮校准流程。
+
 | `input.pipeline` | 进入模型的数组 | 处理 |
 | --- | --- | --- |
 | `raw` | `[1,C,T]` float32 | 原始电压窗口，不滤波、不降采样；T=输入采样率×窗口秒数 |
@@ -72,6 +76,8 @@ with open("manifest.json", "w", encoding="utf-8") as f:
 `input.channels`是模型用到的子集及顺序；`config.device.channels`是完整设备流的逻辑通道表。接入后根据已核对的设备物理通道名重排，再选取子集，不按编号猜测。
 
 可选`input.normalization={"mean":[...],"std":[...]}`，两数组长度为C，std必须为正。标准化在FIR之后、双频带之前执行。若训练采用其他方式，请在ONNX图内完成并选择合适pipeline，避免重复处理。
+
+实时工作台统一默认使用`0.1`秒（10 Hz）在线预测步长，不依赖本机配置文件。可在`configs/workbench.local.json`的`prediction_stride_seconds`全局设置，或在没有全局设置时用`models.<模型ID>.prediction_stride_seconds`配置ONNX模型。此设置仅改变窗口滑动和推理调度，保留原模型包、预处理及内置校准；有效步长写入新会话配置，原步长保存在`session_metadata.model_stride_seconds`，ONNX单模型覆盖另保留`manifest_stride_seconds`。ONNX/v2步长须为预处理输出采样间隔的整数倍；原生四/六分类及重训PT运行时保留已支持的0.1秒节奏。独立使用`ONNXDecoder`且未传入覆盖参数时仍遵循模型清单。
 
 输出必须是 `[1,K]`，K为2～6。`logits`会经过稳定softmax；`probabilities`须非负、有限且和为1。模型只有一个float32输入和一个输出，节点名称必须与清单一致。动态批次/维度允许，但实际运行尺寸仍按清单检查。
 

@@ -38,6 +38,13 @@ class ReceiveTiming:
                     clock='ACP parser callback, independent of processing',
                     physical_sample_clock_verified=False)
 
+    def restart_observation(self):
+        """Discard transport-burst rate estimates, retaining totals and last arrival."""
+        with self.lock:
+            if self.arrivals:
+                self.arrivals = deque([self.arrivals[-1]])
+            self.bad_since = None
+
     def check(self, snapshot, now=None):
         now = time.monotonic() if now is None else now
         if snapshot['backlog_seconds'] > self.max_backlog:

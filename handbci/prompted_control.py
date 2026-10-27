@@ -344,6 +344,35 @@ class PromptedControl:
                                        estimated_source_index=self.latest_source()+1)
         self.phase, self.completed_at = 'executing', time.monotonic()
 
+    def suspend_stream(self, reason):
+        if self.phase == 'waiting_stream':
+            return
+        self.stream_previous_phase = self.phase
+        if self.current is not None and self.phase != 'executing':
+            # Keep the interrupted attempt under its own trial ID, then retry
+            # the same target with a new display ACK and new prepare/cue marks.
+            interrupted = copy.deepcopy(self.current)
+            interrupted.update(complete=False, execution_status='stream_interrupted', interruption=reason)
+            self.trials.append(interrupted)
+            self.markers.record(dict(kind='trial_interrupted', **interrupted))
+            self.plan.insert(len(self.trials), {k:interrupted[k] for k in ('round','label')})
+            plan_file = self.folder/'trial_plan.json'
+            plan = json.loads(plan_file.read_text(encoding='utf-8'))
+            plan['trials'] = self.plan
+            write_json(plan_file, plan)
+            write_json(self.folder/'trials.partial.json', self.trials)
+            self.current = None
+        self.phase, self.prompt_id = 'waiting_stream', None
+        self.gate.reset_candidate()
+
+    def resume_stream(self):
+        if self.phase != 'waiting_stream':
+            return
+        if self.stream_previous_phase in ('executing', 'waiting_calibration', 'complete'):
+            self.phase = self.stream_previous_phase
+        else:
+            self._prompt()
+
     def motion(self, event):
         if self.finalized or self.current is None or event.get('sequence') != self.current.get('command_sequence'):
             return
@@ -424,7 +453,8 @@ class PromptedControl:
                         and t.get('start_sample') is not None and t.get('end_sample') is not None
                         and t['start_sample'] < t['end_sample'])
         verified = sum(aligned_hardware(t) for t in self.trials)
-        summary = dict(complete=self.phase == 'complete', planned=len(self.plan),
+        summary = dict(complete=self.phase == 'complete' and all(t.get('complete') for t in self.trials), planned=len(self.plan),
+                       contains_interrupted_trials=any(not t.get('complete') for t in self.trials),
                        completed=sum(bool(t.get('complete')) for t in self.trials),
                        hardware_verified_trials=verified, physical_output=self.physical,
                        marking=self.settings['marking'], signal_seconds=n/fs,

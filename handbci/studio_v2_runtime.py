@@ -114,6 +114,11 @@ class StudioV2Decoder:
         if self.model.calibration is None:
             raise ValueError('v2源模型尚未专用校准；请在校准工具完成后导入calibrated.pt。')
         self.cfg=cfg;self.stream=StreamPreprocessor(cfg)
+        self.prediction_stride_seconds=float(cfg['window']['stride_seconds'])
+        if (not np.isfinite(self.prediction_stride_seconds) or self.prediction_stride_seconds <= 0
+                or abs(self.prediction_stride_seconds*self.stream.output_fs-round(self.prediction_stride_seconds*self.stream.output_fs))>1e-6):
+            raise ValueError('v2预测步长须为输出采样间隔的正整数倍。')
+        self.prediction_step=round(self.prediction_stride_seconds*self.stream.fs)
         self.order=[cfg['device']['channels'].index(c) for c in self.model.channels]
         self.prompted=False
         self.recover_stream(0,'initial')
@@ -139,13 +144,13 @@ class StudioV2Decoder:
             if self.anchor is None:return None
             starts=[]
             while self.next_start+1996<=self.indices[-1]:
-                starts.append(self.next_start);self.next_start+=500
+                starts.append(self.next_start);self.next_start+=self.prediction_step
             if not starts:return None
             start=starts[-1]
             first=int(np.searchsorted(self.indices,start))
             if first+500>len(self.indices) or self.indices[first]!=start:return None
         else:
-            if (indices[-1]/self.stream.fs)-self.last_prediction<.5-1e-9:return None
+            if (indices[-1]/self.stream.fs)-self.last_prediction<self.prediction_stride_seconds-1e-9:return None
             first=len(self.indices)-500
         window=self.history[:,first:first+500]
         z=self.model.predict_logits(window[None])

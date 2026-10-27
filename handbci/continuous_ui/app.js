@@ -158,7 +158,7 @@ function requestMonitorFullscreen(){
   }catch{return Promise.resolve();}
 }
 function renderMonitorFocus(){
-  const active=!!state?.running&&!offline&&state.session_purpose==='decode'&&state.mode==='six'&&
+  const active=workspaceKind==='six'&&!!state?.running&&!offline&&state.session_purpose==='decode'&&['six','acp','simulated'].includes(state.mode)&&
     (!!state.subject_window_id||!state.prompted?.enabled);
   const wasActive=monitorFocusActive;monitorFocusActive=active;
   document.body.classList.toggle('decode-monitor-focus',active);
@@ -462,6 +462,7 @@ function subjectPresentation(){
     return {phase:'脑电校准',text:c?.ready?'校准完成':c?.phase==='imagery'?c.task:c?.phase==='rest'?'休息':'请保持放松',detail:''};
   }
   const p=state.prompted||{};
+  if(p.phase==='waiting_stream')return {phase:'在线控制',text:'脑电暂缓',detail:'保持连接，恢复后重新提示任务'};
   if(p.phase==='executing')return {phase:'在线控制',text:'休息',detail:''};
   if(p.phase==='complete')return {phase:'在线控制',text:'本次采集完成',detail:'正在保存'};
   return {phase:'运动想象',text:p.task_text||'请保持放松',
@@ -497,7 +498,7 @@ function renderPrompted(){
   const resting=p.phase==='executing';
   text('promptedTarget',resting?'休息':p.task_text|| (p.phase==='complete'?'本次采集完成':'等待目标提示'));
   text('promptedTask',resting||p.phase==='complete'?'':p.target_action?`机械手：${handActions[p.target_action]||p.target_action}`:'先完成设备检查与所选模型的脑电校准。');
-  const labels={connecting:'正在连接设备与核验TriggerBox',waiting_calibration:'等待脑电校准完成',awaiting_display:'保持本次运动想象',marking_cue:'保持本次运动想象',cue_hold:'保持本次运动想象',decoding:'保持本次运动想象',executing:'放松休息',complete:'全部试次完成，正在保存数据'};
+  const labels={connecting:'正在连接设备与核验TriggerBox',waiting_stream:'脑电暂缓，保持连接等待恢复',waiting_calibration:'等待脑电校准完成',awaiting_display:'保持本次运动想象',marking_cue:'保持本次运动想象',cue_hold:'保持本次运动想象',decoding:'保持本次运动想象',executing:'放松休息',complete:'全部试次完成，正在保存数据'};
   text('promptedStatus',`${p.round?'第'+p.round+'轮 · ':''}${!state.running?'会话已停止，记录已保存':labels[p.phase]||p.phase}${p.marking==='software'?' · 软件估计标记':''}${state.output_mode!=='inspire'?' · 机械手模拟':''}`);
   const promptSession=p.session_id,promptId=p.prompt_id,key=promptSession+':'+promptId;
   if(!state.subject_window_id&&state.running&&state.status!=='stopping'&&p.phase==='awaiting_display'&&p.prompt_id&&key!==acknowledgedPrompt&&key!==pendingPrompt&&document.visibilityState==='visible'){

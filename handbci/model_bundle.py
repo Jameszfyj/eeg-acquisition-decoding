@@ -6,6 +6,7 @@ import copy
 import hashlib
 import io
 import json
+import math
 from pathlib import Path
 import shutil
 import time
@@ -21,6 +22,62 @@ FORMAT = 'handbci.onnx.v1'
 MAX_UPLOAD = 32 * 1024 * 1024
 MAX_MODEL = 128 * 1024 * 1024
 ROOT = Path(__file__).resolve().parents[1]
+PREPARE_PROFILE = 'l100d250h4_pre_v2'
+
+
+def native_prepare_contract(manifest):
+    studio = manifest.get('studio', {})
+    if not isinstance(studio,dict):
+        raise ValueError('模型studio元数据须为对象。')
+    if studio.get('arm') != 'B_platform_native':
+        return False
+    cfg = manifest['config']
+    if (studio.get('profile') != PREPARE_PROFILE
+            or studio.get('profile_fingerprint') != 'ac09b1dccf7810e4'
+            or cfg['window'].get('anchor') != 'prepare'
+            or cfg['window']['seconds'] != 2. or cfg['window']['stride_seconds'] != .5
+            or cfg['device']['sample_rate'] != 1000
+            or manifest['input']['pipeline'] != 'ifnet_filterbank'
+            or any(cfg['preprocess'].get(k) != v for k,v in dict(output_rate=250.,
+                lowpass_hz=100.,highpass_hz=4.,numtaps=201,trim_seconds=1.).items())):
+        raise ValueError('平台原生IFNet准备锚点配置与声明的v2流程不一致。')
+    return True
+
+
+def embedded_calibration(manifest, model_data):
+    """Recognize the declared native bias only when it is the graph's final Add."""
+    if not native_prepare_contract(manifest):
+        return None
+    calibration = manifest['config']['session_metadata'].get('calibration')
+    if calibration is None:
+        return None
+    if not isinstance(calibration,dict) or not isinstance(calibration.get('protocol'),dict):
+        raise ValueError('模型内置校准声明须包含有效的协议对象。')
+    import onnx
+    from onnx import numpy_helper
+    count = len(manifest['config']['classes'])
+    bias = np.asarray(calibration.get('bias'), float)
+    sessions = calibration.get('sessions', [])
+    protocol = calibration.get('protocol', {})
+    if (calibration.get('method') != 'handbci.shared_calibration.fit_bias'
+            or manifest['output']['kind'] != 'logits' or bias.shape != (count,)
+            or not np.isfinite(bias).all() or not isinstance(sessions, list) or not sessions
+            or any(not isinstance(x,str) or not x for x in sessions)
+            or len(sessions) != len(set(sessions))
+            or protocol.get('rounds') != 20 or protocol.get('trials') != 20*count
+            or calibration.get('trials') != len(sessions)*protocol['trials']):
+        raise ValueError('模型内置校准的算法、偏置或任务来源声明无效。')
+    graph = onnx.load_model_from_string(model_data).graph
+    output = manifest['output']['name']
+    nodes = [node for node in graph.node if output in node.output]
+    constants = {item.name:numpy_helper.to_array(item) for item in graph.initializer}
+    if len(nodes) == 1 and nodes[0].op_type == 'Add' and len(nodes[0].input) == 2:
+        for name in nodes[0].input:
+            value = constants.get(name)
+            if value is not None and value.shape in ((count,), (1,count)):
+                if np.allclose(value.reshape(-1),bias,rtol=1e-6,atol=1e-7):
+                    return copy.deepcopy(calibration)
+    raise ValueError('清单声明的校准偏置未与ONNX输出层的实际加法对应。')
 
 
 def validate_manifest(value):
@@ -63,6 +120,7 @@ def validate_manifest(value):
     if not isinstance(m.get('name'), str) or not 1 <= len(m['name'].strip()) <= 100:
         raise ValueError('模型名称须为1至100个字符。')
     m.update(participant_id=owner, config=cfg)
+    native_prepare_contract(m)
     return m
 
 
@@ -117,16 +175,24 @@ class RawStream:
 
 
 class ONNXDecoder:
-    def __init__(self, folder, manifest=None):
+    def __init__(self, folder, manifest=None, *, prediction_stride_seconds=None):
         import onnxruntime as ort
         self.folder = Path(folder)
         self.manifest = validate_manifest(manifest or json.loads((self.folder/'manifest.json').read_text(encoding='utf-8')))
         m = self.manifest
         cfg = m['config']
         self.stream = RawStream(cfg) if m['input']['pipeline'] == 'raw' else StreamPreprocessor(cfg)
+        interval = cfg['window']['stride_seconds'] if prediction_stride_seconds is None else prediction_stride_seconds
+        if (isinstance(interval, bool) or not isinstance(interval, (int, float))
+                or not math.isfinite(interval) or not 1/self.stream.output_fs <= interval <= 60
+                or abs(interval*self.stream.output_fs-round(interval*self.stream.output_fs)) > 1e-6):
+            raise ValueError('预测步长须为输出采样间隔的整数倍，且不超过60秒。')
+        self.prediction_stride_seconds = float(interval)
         self.order = [cfg['device']['channels'].index(c) for c in m['input']['channels']]
         self.n_time = round(cfg['window']['seconds']*self.stream.output_fs)
         self.n_classes = len(cfg['classes'])
+        self.prepare_aligned = native_prepare_contract(m)
+        self.embedded_calibration = embedded_calibration(m, (self.folder/'model.onnx').read_bytes())
         options = ort.SessionOptions()
         options.intra_op_num_threads = 2
         options.inter_op_num_threads = 1
@@ -160,22 +226,50 @@ class ONNXDecoder:
         self.history = np.empty((len(self.order), 0), np.float32)
         self.indices = np.empty(0, np.int64)
         self.last_prediction, self.last_window = -float('inf'), None
+        self.prompted, self.anchor, self.next_start = False, None, None
+
+    def set_prompt_anchor(self, source_index):
+        if not self.prepare_aligned:
+            return
+        self.prompted = True
+        factor = self.stream.factor
+        anchor = round(source_index/factor)*factor if source_index is not None else None
+        if anchor != self.anchor:
+            self.anchor, self.next_start = anchor, anchor
 
     def process(self, raw, indices):
         processed, retained = self.stream.process(raw, indices)
         if not len(retained): return None
-        self.history = np.concatenate((self.history, processed[self.order]), axis=1)[:, -self.n_time:]
-        self.indices = np.concatenate((self.indices, retained))[-self.n_time:]
+        capacity = self.n_time + round(self.stream.output_fs*self.prediction_stride_seconds)+2 if self.prepare_aligned else self.n_time
+        self.history = np.concatenate((self.history, processed[self.order]), axis=1)[:, -capacity:]
+        self.indices = np.concatenate((self.indices, retained))[-capacity:]
         now = float(indices[-1])/self.stream.fs
-        interval = self.manifest['config']['window']['stride_seconds']
-        if self.history.shape[1] < self.n_time or now-self.last_prediction < interval-1e-9: return None
-        values = self.history[None].copy()
+        interval = self.prediction_stride_seconds
+        if self.history.shape[1] < self.n_time: return None
+        if self.prepare_aligned and self.prompted:
+            if self.anchor is None: return None
+            factor = self.stream.factor
+            last_start = int(self.indices[-1])-(self.n_time-1)*factor
+            if last_start < self.next_start: return None
+            step = round(interval*self.stream.fs)
+            start = self.next_start + ((last_start-self.next_start)//step)*step
+            self.next_start = start+step
+            first = int(np.searchsorted(self.indices,start))
+            if first+self.n_time>len(self.indices) or self.indices[first]!=start: return None
+        else:
+            if now-self.last_prediction < interval-1e-9: return None
+            first = self.history.shape[1]-self.n_time
+        window_indices = self.indices[first:first+self.n_time]
+        values = self.history[None,:,first:first+self.n_time].copy()
         norm = self.manifest['input'].get('normalization')
         if norm: values = (values-np.asarray(norm['mean'],np.float32)[None,:,None])/np.asarray(norm['std'],np.float32)[None,:,None]
         if self.manifest['input']['pipeline'] == 'ifnet_filterbank': values = filter_bank(values, self.stream.output_fs)
         result = self.predict(np.ascontiguousarray(values, dtype=np.float32))
         self.last_prediction = now
-        self.last_window = self.stream.window_bounds(self.indices, indices[-1])
+        self.last_window = self.stream.window_bounds(window_indices, indices[-1])
+        if self.prepare_aligned and self.prompted:
+            self.last_window.update(profile=PREPARE_PROFILE,anchor='prepare',
+                model_start_index=int(window_indices[0]),prepare_source_index=self.anchor)
         return now, result
 
 
@@ -231,6 +325,19 @@ def prepare_entry(entry, folder):
         model=str(folder),sha256=entry['sha256'],runtime='onnx',source=cfg['device']['source'],
         synthetic_model=cfg['device']['source']=='synthetic_tcp',n_channels=len(m['input']['channels']),
         n_classes=len(cfg['classes']),sample_rate=cfg['device']['sample_rate'],driver='mock',physical_action=False)
+    if native_prepare_contract(m):
+        selection.update(native_platform_ifnet=True,preprocessing_profile=PREPARE_PROFILE)
+    calibration = embedded_calibration(m, (folder/'model.onnx').read_bytes())
+    if calibration is not None:
+        selection.update(embedded_calibration_ready=True,requires_calibration=False,
+            calibration_method='embedded_native_logit_bias_v1',
+            embedded_calibration_trials=calibration['trials'],embedded_calibration_sessions=calibration['sessions'])
+    from .workbench_settings import model_preferences
+    stride = model_preferences(entry['model_id']).get('prediction_stride_seconds')
+    if stride is not None:
+        cfg['session_metadata']['manifest_stride_seconds'] = cfg['window']['stride_seconds']
+        cfg['window']['stride_seconds'] = stride
+        selection['prediction_stride_seconds'] = stride
     return selection,cfg
 
 
