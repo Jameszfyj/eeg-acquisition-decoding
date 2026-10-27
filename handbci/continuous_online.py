@@ -1371,7 +1371,7 @@ class ContinuousController(OnlineController):
     def _acp_loop(self, cfg, decoder, gate, predictions, commands, session):
         from .studio.devices import NeusenAdapter
         from .receive_timing import ReceiveTiming
-        from .stream_recovery import StreamRecovery
+        from .stream_recovery import StreamRecovery, ForwardGapRecovery, packet_discontinuity
         import h5py
         packets, faults, protocol_events = queue.Queue(4096), queue.Queue(), queue.Queue()
         markers, prompted = None, None
@@ -1379,6 +1379,7 @@ class ContinuousController(OnlineController):
         initialization_end_source, decoder_started = None, False
         timing = ReceiveTiming(cfg['device']['sample_rate'])
         recovery = StreamRecovery(len(cfg['device']['channels']),5)
+        forward_gaps = ForwardGapRecovery()
         waiting_for_stream, waiting_reason, waiting_samples = False, '', 0
         def packet(p):
             nonlocal received_origin_ms, latest_source
@@ -1587,13 +1588,38 @@ class ContinuousController(OnlineController):
                                     previous=p
                                     if pending_samples>=batch_samples:persist_pending()
                                     continue
-                            pending.append((p,arrival));pending_samples += p.counts.shape[1]
                             if previous is not None:
-                                expected = previous.device_ms+previous.counts.shape[1]*1000/fs
-                                if abs(p.device_ms-expected) > .501 or p.packet_id != ((previous.packet_id+1)&255):
+                                gap_detail = packet_discontinuity(previous, p, fs)
+                                if gap_detail is not None:
                                     h.attrs['contains_discontinuities'] = True
                                     with self.condition:self.state['gap_count'] += 1
-                                    raise RuntimeError('设备时间轴或包序号出现缺口，已停止；原始记录保留，未拼接或补点。')
+                                    protocol_events.put(dict(kind='stream_gap',detail=gap_detail,
+                                        wall_ns=time.time_ns(),mono_ns=time.monotonic_ns()))
+                                    reason = f"脑电缺口{gap_detail['device_gap_ms']:g}毫秒；当前窗口或试次作废"
+                                    wait_for_stream(reason)
+                                    try:
+                                        event = forward_gaps.accept(gap_detail)
+                                        if not hasattr(decoder, 'recover_stream'):
+                                            raise RuntimeError('当前模型不支持中断后重新积累窗口，已停止并保存。')
+                                    except RuntimeError:
+                                        # Retain the offending verified frame even when recovery is refused.
+                                        pending.append((p,arrival));pending_samples += p.counts.shape[1]
+                                        raise
+                                    archived = pending_samples
+                                    persist_pending()  # Never mix either side of a gap into a model batch.
+                                    first_source = round((p.device_ms-source_origin_ms)*fs/1000)
+                                    decoder.recover_stream(first_source, reason)
+                                    gate.reset_candidate();gate.latched=None;gate.neutral_since=None;rates.clear()
+                                    event.update(first_new_source_index=first_source,
+                                                 archived_before_gap_without_inference=archived)
+                                    protocol_events.put(dict(kind='stream_recovery',detail=event,
+                                        wall_ns=time.time_ns(),mono_ns=time.monotonic_ns()))
+                                    with self.condition:
+                                        self.state.update(stream_recovery=event,phase='recovering_stream',probabilities=[],
+                                            gate=dict(candidate=None,progress=0.,reason='短暂缺包 · 暂停动作并重新积累完整窗口'))
+                                        if hasattr(decoder,'snapshot_calibration'):
+                                            self.state['calibration']=decoder.snapshot_calibration()
+                            pending.append((p,arrival));pending_samples += p.counts.shape[1]
                             previous = p
                             if pending_samples < batch_samples:continue
                             raw,ix = persist_pending()
