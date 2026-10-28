@@ -118,9 +118,10 @@ class SessionWriter:
                 self.ready.set()
                 batch = []
                 pending = 0
+                validation_previous_id = None
 
                 def flush():
-                    nonlocal pending, previous_end
+                    nonlocal pending, previous_end, validation_previous_id
                     if not batch:
                         return
                     values = np.concatenate([x.counts for x in batch], axis=1)
@@ -153,7 +154,13 @@ class SessionWriter:
                     self.count += n
                     h.attrs["n_samples"] = self.count
                     if self.validation:
-                        self.validation.submit('data', (eeg, stamps, begin))
+                        breaks, offset = [], begin
+                        for packet in batch:
+                            if validation_previous_id is not None and packet.packet_id != (validation_previous_id+1)&255:
+                                breaks.append(offset)
+                            validation_previous_id = packet.packet_id
+                            offset += packet.counts.shape[1]
+                        self.validation.submit('data', (eeg, stamps, begin, breaks))
                     batch.clear()
                     pending = 0
 
@@ -197,7 +204,7 @@ class SessionWriter:
                             continue
                         event["sample_index"] = max(0, min(i, len(stamps)))
                         event["alignment"] = 'device_clock_lower_bound' if event.get('echo_verified') or event['kind'] == 'device_event' else 'estimated_host_receive_clock'
-                        if event["kind"] == "device_event" and i < len(stamps) and event.get("event_id") is not None:
+                        if (event["kind"] == "device_event" or event.get('trigger_mode') == 'software') and i < len(stamps) and event.get("event_id") is not None:
                             code, existing = int(event['event_id']), int(ds['trigger'][i])
                             if existing:
                                 event['trigger_dataset_collision'] = True

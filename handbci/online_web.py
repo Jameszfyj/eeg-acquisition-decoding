@@ -453,6 +453,8 @@ def create_online_server(controller, *, port=0, assets=None):
                 elif self.path == "/api/stop":
                     controller.stop()
                     self.reply(200, {"ok": True})
+                elif self.path == '/api/disconnect' and hasattr(controller, 'disconnect_devices'):
+                    self.reply(200, controller.disconnect_devices())
                 elif self.path == '/api/subject/stop' and hasattr(controller, 'stop_subject'):
                     self.reply(200, controller.stop_subject(payload))
                 elif self.path == '/api/monitor/stop' and hasattr(controller, 'stop_monitor'):

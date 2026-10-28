@@ -1,4 +1,4 @@
-"""Only small forward gaps corroborated by both device clocks and IDs recover."""
+"""Losses are recorded without stopping or inventing missing samples."""
 import unittest
 from types import SimpleNamespace
 
@@ -26,8 +26,8 @@ class PacketGapRecoveryTests(unittest.TestCase):
             self.assertEqual(event['missing_frames'], missing_ms//5)
             self.assertEqual(event['repaired_samples'], 0)
 
-    def test_regression_duplicate_and_unmatched_clock_or_id_still_stop(self):
-        for ms, seq in ((1000, 254), (995, 253), (1005, 0), (1015, 255), (1016, 1), (1110, 20)):
+    def test_regression_and_duplicate_still_stop(self):
+        for ms, seq in ((1000, 254), (995, 253)):
             detail = packet_discontinuity(packet(1000, 254), packet(ms, seq), 1000)
             with self.subTest(ms=ms, seq=seq), self.assertRaises(RuntimeError):
                 ForwardGapRecovery().accept(detail)
@@ -37,20 +37,20 @@ class PacketGapRecoveryTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             ForwardGapRecovery().accept(detail)
 
-    def test_repeated_small_losses_stop_but_old_events_expire(self):
+    def test_repeated_and_large_losses_keep_valid_votes(self):
         recovery = ForwardGapRecovery()
-        for i in range(10):
-            recovery.accept(self.detail(5), now=i)
-        with self.assertRaisesRegex(RuntimeError, '60秒'):
-            recovery.accept(self.detail(5), now=10)
-        self.assertEqual(recovery.accept(self.detail(5), now=70)['recovery_number'], 11)
+        for i in range(100):
+            event = recovery.accept(self.detail(5000 if i % 2 else 5), now=i/10)
+            self.assertFalse(event['decision_votes_cleared'])
+        self.assertEqual(event['recovery_number'], 100)
+        self.assertEqual(event['missing_samples'], 5000)
 
-    def test_total_lost_time_has_an_independent_limit(self):
-        recovery = ForwardGapRecovery()
-        recovery.accept(self.detail(100), now=0)
-        recovery.accept(self.detail(100), now=1)
-        with self.assertRaisesRegex(RuntimeError, '累计'):
-            recovery.accept(self.detail(5), now=2)
+    def test_uncorroborated_sequence_loss_is_flagged_not_repaired(self):
+        for ms, seq in ((1005, 0), (1015, 255), (1016, 1)):
+            detail = packet_discontinuity(packet(1000, 254), packet(ms, seq), 1000)
+            event = ForwardGapRecovery().accept(detail)
+            self.assertFalse(event['clock_id_consistent'])
+            self.assertEqual(event['repaired_samples'], 0)
 
 
 if __name__ == '__main__':

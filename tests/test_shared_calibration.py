@@ -55,22 +55,23 @@ class SharedCalibrationTests(unittest.TestCase):
             output=dict(mode='simulation'),decision=dict(mode='vote'),
             prompted=dict(enabled=True,loops=1,marking='software'),**values)
 
-    def test_prompted_import_requires_calibration_and_accepts_shared_source(self):
+    def test_prompted_import_skips_calibration_even_with_stale_history_selection(self):
         request=self.request()
         selection,cfg,*_=self.controller.prepare(request)
-        self.assertTrue(selection['requires_calibration'])
-        self.assertEqual((selection['calibration_rounds'],selection['calibration_trials']),(20,40))
-        with self.assertRaisesRegex(ValueError,'校准'):
-            self.controller.start_decoding(request)
+        self.assertFalse(selection['requires_calibration'])
+        self.assertTrue(selection['online_calibration_disabled'])
         with patch.object(self.controller,'start',side_effect=lambda value:value):
-            payload=self.controller.start_calibration(request)
-            self.assertEqual(payload['session_purpose'],'calibration')
-            self.assertFalse(payload['prompted']['enabled'])
+            self.assertEqual(self.controller.start_decoding(request)['session_purpose'],'decode')
+            with self.assertRaisesRegex(ValueError,'暂时禁用'):
+                self.controller.start_calibration(request)
         self.make_source()
         details=self.controller.model_details('DEMO_ONNX',self.entry['model_id'])
-        self.assertTrue(details['requires_prompted_calibration'])
+        self.assertFalse(details['requires_prompted_calibration'])
         self.assertEqual(details['previous_calibration']['id'],self.session_id)
         request.update(calibration_mode='reuse',calibration_source=self.session_id)
+        selection,cfg,*_=self.controller.prepare(request)
+        self.assertNotIn('calibration_reuse',cfg['session_metadata'])
+        self.assertNotIn('imported_calibration',selection)
         with patch.object(self.controller,'start',side_effect=lambda value:value):
             self.assertEqual(self.controller.start_decoding(request)['session_purpose'],'decode')
 

@@ -48,7 +48,7 @@ def make_server(root, port=57373):
             q = {k:v[0] for k,v in parse_qs(u.query).items()}
             try:
                 if u.path == '/api/state': return self.send({**c.state(),'token':token,'service':'handbci.studio',
-                    'server_root':str(c.root),'version':'2026.10.23.3'})
+                    'server_root':str(c.root),'version':'2026.10.28.1'})
                 if u.path == '/api/waveform': return self.send(c.waveform())
                 if u.path == '/api/ports': return self.send(serial_ports())
                 if u.path == '/api/sessions': return self.send(c.sessions())
@@ -85,7 +85,8 @@ def make_server(root, port=57373):
                 elif route == '/api/audio': result = c.prepare_audio(body['protocol'])
                 elif route == '/api/validation/model': result = c.import_validation(body['participant'],body['data'],body['filename'],body.get('manifest'))
                 elif route == '/api/start': result = c.start(body['participant'],body['protocol'],require_subject=True,
-                    validation=bool(body.get('validation',False)),validation_model_id=body.get('validation_model_id'))
+                    validation=bool(body.get('validation',False)),validation_model_id=body.get('validation_model_id'),
+                    marking=body.get('marking'))
                 elif route == '/api/subject-heartbeat':
                     import time
                     c.subject_heartbeat = time.perf_counter()

@@ -72,7 +72,7 @@ class OfflineValidationTests(unittest.TestCase):
             np.testing.assert_allclose(row['probabilities'],expected,atol=1e-7,rtol=1e-6)
             self.assertGreaterEqual(row['input_window']['source_start_index'],2000)
 
-    def test_gap_skips_one_trial_next_trial_still_scores_and_aborted_trial_is_saved(self):
+    def test_gap_skips_only_affected_slices_and_later_trials_keep_scoring(self):
         v=self.verifier();session=self.root/'session';session.mkdir();v.start(session)
         x=np.ones((8,15000),np.float32);times=np.arange(15000,dtype=float);times[3500:]+=5
         v.submit('data',(x,times,0))
@@ -80,8 +80,9 @@ class OfflineValidationTests(unittest.TestCase):
             for row in marks.values():v.submit('event',row)
         result=v.finish()
         self.assertEqual(result['status'],'finished',result)
-        self.assertEqual([r['status'] for r in v.results],['skipped','completed','skipped'])
-        self.assertIn('Gap',v.results[0]['reason'])
+        self.assertEqual([r['status'] for r in v.results],['completed','completed','transmission_error'])
+        self.assertEqual(v.results[0]['skipped_windows'],4)
+        self.assertEqual(v.results[0]['windows'],1)
         self.assertEqual(v.results[1]['windows'],5)
         self.assertIsNone(v.results[1]['predicted_class'])  # Exact graph tie abstains.
         self.assertFalse(v.results[1]['correct'])  # Unresolved verified trials stay in the denominator.
@@ -96,6 +97,107 @@ class OfflineValidationTests(unittest.TestCase):
         self.assertFalse(result['label_verified']);self.assertIsNone(result['correct'])
         with self.assertRaisesRegex(ValueError,'窗口不足'):
             v.evaluate(self.marks(end=2500),io.StringIO())
+
+    def test_fir_gap_support_is_excluded_and_remaining_inputs_match_clean_segment(self):
+        v=self.verifier('fir')
+        x=np.random.default_rng(33).normal(size=(8,12000)).astype(np.float32)*100
+        ix=np.r_[np.arange(4000),np.arange(4100,12000)]
+        v.batches.append((x[:,ix],ix.astype(float),0))
+        captured=[];predict=v.decoder.predict_window
+        def capture(y):
+            captured.append(y.copy());return predict(y)
+        v.decoder.predict_window=capture
+        log=io.StringIO();result=v.evaluate(self.marks(end=10000),log)
+        rows=[json.loads(s) for s in log.getvalue().splitlines()]
+        valid=[r for r in rows if 'probabilities' in r]
+        self.assertEqual(result['skipped_windows'],5)
+        self.assertEqual(result['windows'],6)
+        clean=ONNXDecoder(v.folder);clean.stream.reset(4100)
+        values,retained=clean.stream.process(x[:,4100:],np.arange(4100,12000))
+        for y,row in zip(captured,valid):
+            window=row['input_window']
+            self.assertGreaterEqual(window['source_start_index'],4100)
+            a=np.searchsorted(retained,window['model_start_index'])
+            np.testing.assert_allclose(y,values[clean.order,a:a+clean.n_time],atol=1e-7,rtol=1e-6)
+
+    def test_sequence_only_gap_and_all_lost_windows_are_recorded(self):
+        v=self.verifier();x=np.ones((8,9000),np.float32)
+        v.batches.append((x,np.arange(9000),0,[3500]))
+        result=v.evaluate(self.marks(),io.StringIO())
+        self.assertEqual(result['skipped_windows'],3)
+        self.assertEqual(result['windows'],2)
+        v.batches.clear()
+        v.batches.append((x,np.arange(9000),0,list(range(1000,9000,500))))
+        result=v.evaluate(self.marks(),io.StringIO())
+        self.assertEqual(result['status'],'transmission_error')
+        self.assertEqual(result['reason'],'传输异常')
+        self.assertEqual(result['skipped_windows'],5)
+        self.assertEqual(result['windows'],0)
+
+    def test_missing_trial_tail_still_votes_on_valid_slices(self):
+        v=self.verifier();ix=np.r_[np.arange(4500),np.arange(7000,9000)]
+        x=np.zeros((8,len(ix)),np.float32);x[0]=100
+        v.batches.append((x,ix.astype(float),0))
+        result=v.evaluate(self.marks(),io.StringIO())
+        self.assertEqual(result['status'],'completed')
+        self.assertEqual(result['windows'],2)
+        self.assertEqual(result['skipped_windows'],3)
+        self.assertEqual(result['votes'],[2,0])
+
+    def test_entire_trial_inside_gap_reports_transmission_error_then_recovers(self):
+        v=self.verifier();session=self.root/'all_lost';session.mkdir();v.start(session)
+        ix=np.r_[np.arange(1500),np.arange(7000,15000)]
+        x=np.zeros((8,len(ix)),np.float32);x[0]=100
+        v.submit('data',(x,ix.astype(float),0))
+        for marks in (self.marks(),self.marks(2,7500,8000,12000)):
+            for row in marks.values():v.submit('event',row)
+        result=v.finish()
+        self.assertEqual(result['status'],'finished')
+        self.assertEqual([r['status'] for r in v.results],['transmission_error','completed'])
+        self.assertEqual(v.results[0]['reason'],'传输异常')
+        self.assertEqual(v.results[0]['skipped_windows'],5)
+        self.assertEqual(v.results[1]['votes'],[5,0])
+
+    def test_delayed_tail_previews_valid_prefix_then_completes_all_votes(self):
+        v=self.verifier();session=self.root/'outage';session.mkdir();v.start(session)
+        self.addCleanup(v.finish)
+        x=np.zeros((8,4500),np.float32);x[0]=100
+        v.submit('data',(x,np.arange(4500,dtype=float),0))
+        marks=self.marks()
+        marks['task_end']['mono_time_ns']=time.perf_counter_ns()
+        for row in marks.values():v.submit('event',row)
+        deadline=time.monotonic()+3
+        while v.snapshot()['status'] != 'waiting_data' and time.monotonic()<deadline:
+            time.sleep(.02)
+        result=v.snapshot()['latest']
+        self.assertEqual(result['status'],'waiting_data',result)
+        self.assertEqual(v.snapshot()['completed_trials'],0)
+        self.assertTrue(result['provisional'])
+        self.assertEqual(result['votes'],[2,0])
+        self.assertEqual(result['skipped_windows'],0)
+        self.assertEqual(result['pending_windows'],3)
+        self.assertEqual(result['gap_count'],0)
+        self.assertFalse(result['end_boundary_received'])
+        self.assertFalse(v.closed.is_set())
+        tail=np.zeros((8,2000),np.float32);tail[0]=100
+        v.submit('data',(tail,np.arange(4500,6500,dtype=float),4500))
+        v.finish()
+        self.assertEqual(len(v.results),1)
+        self.assertEqual(v.results[0]['votes'],[5,0])
+        self.assertEqual(v.results[0]['skipped_windows'],0)
+        self.assertTrue(v.results[0]['end_boundary_received'])
+        rows=(session/'onnx_validation'/'predictions.jsonl').read_text().splitlines()
+        self.assertEqual(len(rows),5)  # Provisional votes must not be duplicated in the journal.
+
+    def test_no_received_trial_samples_reports_transmission_error_at_finish(self):
+        v=self.verifier();session=self.root/'no_trial_data';session.mkdir();v.start(session)
+        v.submit('data',(np.zeros((8,1500),np.float32),np.arange(1500,dtype=float),0))
+        for row in self.marks().values():v.submit('event',row)
+        result=v.finish()
+        self.assertEqual(result['status'],'finished')
+        self.assertEqual(v.results[0]['status'],'transmission_error')
+        self.assertEqual(v.results[0]['reason'],'传输异常')
+        self.assertEqual(v.results[0]['windows'],0)
 
     def test_native_prepare_grid_matches_full_stream_input(self):
         from tests.test_native_onnx import fixture

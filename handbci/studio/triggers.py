@@ -7,6 +7,16 @@ import time
 from ..triggerbox import serial_ports, validate_port
 
 
+def software_marker(code, *, wall_time_ns, mono_time_ns):
+    """A host instruction timestamp, never an assertion of hardware onset."""
+    if not 0 <= int(code) <= 255:
+        raise ValueError('事件码须在0至255之间。')
+    return dict(event_id=int(code), trigger_mode='software',
+                send_wall_ns=wall_time_ns, send_mono_ns=mono_time_ns,
+                marker_time_source='host_command_issue',
+                acknowledged=False, echo_verified=False, verification_pending=False)
+
+
 class TriggerManager:
     def __init__(self, on_event, wait_echo, get_device, on_packet=None, on_status=None):
         self.on_event, self.wait_echo, self.get_device = on_event, wait_echo, get_device
@@ -32,6 +42,9 @@ class TriggerManager:
             raise ValueError("当前提供软件标记、USB串口和模拟TriggerBox。其他传输通过触发适配器扩展。")
         with self.lock:
             self.disconnect()
+            if mode == 'software':
+                # Ignore stale hardware fields after changing the mode in the UI.
+                port, wireless_host = '', ''
             if wireless_host and mode != 'serial':
                 raise ValueError('无线事件接收目前配合USB串口打标使用。')
             self.mode = mode
@@ -131,7 +144,9 @@ class TriggerManager:
 
     def test(self):
         if self.mode == "software":
-            raise ValueError("软件标记没有硬件回传自检；请选择USB或模拟TriggerBox。")
+            return dict(mode='software', ready=True, echo_verified=False,
+                        physical_hardware=False, verification='not_required',
+                        message='软件标记已就绪；指令发出时记录，无需TriggerBox或回传自检。')
         result = self.send(240 + time.time_ns()%10, require_echo=True)
         self.verified = True
         return result

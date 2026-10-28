@@ -55,6 +55,9 @@ class Controller:
         self.trigger = TriggerManager(self.local_event_row, self.wait_echo, lambda: self.device,
                                       self._packet, self.status_event)
         self.clock = DeviceClock()
+        from ..device_timeline import DeviceClockEstimate, PIPELINE_REVISION
+        self.pipeline_revision = PIPELINE_REVISION
+        self.sample_clock = DeviceClockEstimate(1000)
         self.preview = deque(maxlen=4000)
         self.arrivals = deque()
         self.logs = deque(maxlen=100)
@@ -88,15 +91,18 @@ class Controller:
         with self.lock:
             self.stats[kind] = self.stats.get(kind, 0)+1
             marker_warning = detail.get('source') == 'triggerbox_acp' or kind == 'marker_warning'
+            loss_warning = kind in ('stalled','silent','clock_gap','crc_error','tail_error','payload_mismatch')
             row = {'kind':'receive_fault', 'fault':kind, 'detail':detail, 'wall_time_ns':time.time_ns(),
-                   'severity':'warning' if marker_warning else 'error'}
+                   'severity':'warning' if marker_warning or loss_warning else 'error'}
             if marker_warning:
                 self.warning = '标记回传异常，脑电继续保存；异常标签将标为未确认。'
+            elif loss_warning:
+                self.warning = '脑电存在丢包或接收暂停；录制与试次验证继续，缺口保留供训练筛选。'
             self.logs.append(row)
             if self.writer:
                 try: self.writer.submit('fault', row)
                 except RuntimeError as exc: self.error = str(exc)
-            if not marker_warning and kind in ('down','stalled','configuration_error','input_overflow','frame_error','clock_reset'):
+            if not marker_warning and kind in ('down','configuration_error','input_overflow','frame_error','clock_reset'):
                 self.error = detail.get('error', detail.get('message', kind))
                 if self.experiment: self.experiment.cancel(self.error)
 
@@ -108,6 +114,7 @@ class Controller:
                     if p.raw_device_ms is None: p.raw_device_ms = p.device_ms
                     if p.kind == 'eeg':
                         p.device_ms, reset = self.clock.eeg(p.device_ms)
+                        self.sample_clock.observe(p.device_ms, p.counts.shape[1], p.mono_ns)
                         if reset: self.status_event('clock_reset', {'error':'设备毫秒计数重置，未人为拼接。'})
                         if self.latest:
                             prev = self.latest
@@ -176,6 +183,8 @@ class Controller:
                 self.latest = None
                 self.first_eeg_mono_ns = None
                 self.clock = DeviceClock()
+                from ..device_timeline import DeviceClockEstimate
+                self.sample_clock = DeviceClockEstimate(options.get('fs',1000))
                 self.preview.clear()
                 self.arrivals.clear()
                 self.impedances = []
@@ -210,6 +219,8 @@ class Controller:
                 self.latest = None
                 self.preview.clear()
                 self.clock = DeviceClock()
+                from ..device_timeline import DeviceClockEstimate
+                self.sample_clock = DeviceClockEstimate(self.device.settings['fs'])
                 self.display_filter = DisplayFilter(self.device.settings['fs'], self.device.settings['channels'])
 
     def trigger_connect(self, mode, port='', **options):
@@ -265,14 +276,21 @@ class Controller:
             self.validation_model = import_validation_model(self.root, participant, data, filename, manifest)
             return copy.deepcopy(self.validation_model)
 
-    def start(self, participant, protocol, require_subject=False, validation=False, validation_model_id=None):
+    def start(self, participant, protocol, require_subject=False, validation=False, validation_model_id=None,
+              marking=None):
         with self.operation:
             self.idle_required()
             p = validate_protocol(protocol)
             self.prepare_audio(p)
             if not self.device or not self.device.running or self.device.impedance_active:
                 raise ValueError('请连接设备并结束阻抗模式。')
-            if not self.trigger_selected: raise ValueError('请明确选择标记模式并连接。软件标记仅为估计。')
+            if marking == 'software':
+                self.trigger.connect('software')
+                self.trigger_selected = True
+            elif marking is not None and (marking not in ('serial', 'simulated') or
+                                          not self.trigger_selected or self.trigger.mode != marking):
+                raise ValueError('请先连接当前选择的标记设备；软件标记可直接开始。')
+            if not self.trigger_selected: raise ValueError('请选择标记方式；软件标记可直接开始，无需连接TriggerBox。')
             if self.trigger.mode != 'software' and not self.trigger.state()['echo_verified']:
                 raise ValueError('请先通过脑电流回传自检；串口握手或ACK不等于硬件对齐。')
             if not self.latest or time.perf_counter_ns()-self.latest.mono_ns > 1e9:
@@ -316,8 +334,8 @@ class Controller:
             raise RuntimeError('被试页面超过2秒未响应，保留记录并中止。')
         if self.error: raise RuntimeError(self.error)
         if self.writer and self.writer.error: raise RuntimeError(self.writer.error)
-        if not self.latest or time.perf_counter_ns()-self.latest.mono_ns > 1e9:
-            raise RuntimeError('1秒未收到脑电，保留文件并中止。')
+        # Missing samples do not change the experimental schedule. A real socket
+        # disconnect is reported separately as `down`; never fabricate samples.
 
     def set_phase(self, phase, row):
         with self.lock: self.phase, self.phase_meta = phase, dict(row)
@@ -334,7 +352,7 @@ class Controller:
     def local_event(self, kind, **data):
         now = time.perf_counter_ns()
         with self.lock:
-            target = self.latest.device_ms+(now-self.latest.mono_ns)/1e6 if self.latest else None
+            target = self.sample_clock.estimate(now)
             row = {'kind':kind,'device_time_ms':target,'wall_time_ns':time.time_ns(),'mono_time_ns':now, **data}
             if self.writer: self.writer.submit('event',row)
             return row
@@ -343,9 +361,19 @@ class Controller:
         row = {'kind':kind, 'event_id':code, 'wall_time_ns':time.time_ns(), 'mono_time_ns':time.perf_counter_ns(), **data}
         with self.lock:
             p = self.latest
-            row['device_time_ms'] = p.device_ms+(row.get('planned_mono_ns',row['mono_time_ns'])-p.mono_ns)/1e6 if p else None
+            row['device_time_ms'] = self.sample_clock.estimate(row['mono_time_ns'])
+            row['clock_alignment'] = 'minimum_observed_arrival_offset'
+        if self.trigger.mode == 'software':
+            from .triggers import software_marker
+            row.update(software_marker(code, wall_time_ns=row['wall_time_ns'], mono_time_ns=row['mono_time_ns']),
+                       marking='software_estimate', dispatch_lag_ms=0.)
+            with self.trigger.lock:
+                self.trigger.last = dict(row)
+            self.local_event_row(row)
+            return row
         try: self.marks.put_nowait(row)
         except queue.Full: raise RuntimeError('标记队列积压，停止会话。')
+        return row
 
     def _mark_loop(self):
         while True:
@@ -439,6 +467,7 @@ class Controller:
                     'device_time_ms':self.latest.device_ms if self.latest else None,
                     'host_wall_ns':self.latest.wall_ns if self.latest else None,
                     'last_packet_age_ms':round((now-self.latest.mono_ns)/1e6,1) if self.latest else None},
+                'pipeline_revision':self.pipeline_revision, 'device_timeline':self.sample_clock.snapshot(now),
                 'recording':self.writer is not None or self.experiment is not None, 'phase':self.phase,
                 'phase_meta':self.phase_meta, 'subject':dict(self.subject_state), 'error':self.error, 'warning':self.warning,
                 'impedance':list(self.impedances), 'logs':list(self.logs)[-15:], 'last_session':self.last_summary,
@@ -457,7 +486,8 @@ class Controller:
         y = np.concatenate([y for _,y in packets],axis=1)
         t = np.concatenate([t+np.arange(y.shape[1])*1000/fs for t,y in packets])
         step = max(1,len(t)//1500)
-        return {'times':t[::step].tolist(),'values':y[:,::step].tolist(),'labels':list(device.labels), 'unit':device.unit}
+        return {'times':t[::step].tolist(),'values':y[:,::step].tolist(),'labels':list(device.labels), 'unit':device.unit,
+                'time_axis':'device_sample_time_ms','sample_interval_ms':step*1000/fs}
 
     def sessions(self):
         result = []
@@ -485,14 +515,19 @@ class Controller:
                 if not relevant: raise ValueError('该试次没有可映射标签。')
                 begin, end = max(0,min(e['sample_index'] for e in relevant)-int(fs)), min(total,max(e['sample_index'] for e in relevant)+int(fs))
             if start is not None:
-                begin = max(begin,int(float(start)*fs))
-                end = min(end,begin+int(float(duration or 10)*fs))
+                timeline = h['device_time_ms'][:]
+                target = float(timeline[0])+float(start)*1000 if len(timeline) else 0
+                begin = max(begin,int(np.searchsorted(timeline,target)))
+                end = min(end,int(np.searchsorted(timeline,target+float(duration or 10)*1000)))
             step = max(1,(end-begin)//2000)
             values = h['eeg'][:,begin:end:step]
             stamps = h['device_time_ms'][begin:end:step]
             # One-second reception bins are computed from all arrival timestamps, not decimated points.
             wall = h['arrival_mono_ns'][begin:end]
             bins, counts = np.unique(((wall-wall[0])//1000000000) if len(wall) else np.array([],dtype=int),return_counts=True)
+            device_times = h['device_time_ms'][begin:end]
+            sample_bins, sample_counts = np.unique(np.floor((device_times-device_times[0])/1000).astype(int)
+                if len(device_times) else np.array([],dtype=int), return_counts=True)
         validation_path = path/'onnx_validation/summary.json'
         validation = json.loads(validation_path.read_text(encoding='utf-8')) if validation_path.is_file() else None
         if validation and trial:
@@ -500,4 +535,6 @@ class Controller:
         return {'metadata':meta,'events':events,'total_samples':total,'sample_start':begin,'step':step,
             'validation':validation,
             'times':stamps.tolist(),'values':values.tolist(),'labels':meta['device']['labels'], 'unit':meta['device']['unit'],
-            'reception':{'seconds':bins.tolist(),'points':counts.tolist()}}
+            'time_axis':'device_sample_time_ms','sample_interval_ms':step*1000/fs,
+            'sampling':{'seconds':sample_bins.tolist(),'points':sample_counts.tolist(),'clock':'device'},
+            'reception':{'seconds':bins.tolist(),'points':counts.tolist(),'clock':'host_arrival'}}

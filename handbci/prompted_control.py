@@ -65,7 +65,7 @@ def validate_settings(raw, mode, classes, gate, output):
 
 
 class OnlineMarkers:
-    def __init__(self, folder, adapter, settings, packet_callback, status_callback):
+    def __init__(self, folder, adapter, settings, packet_callback, status_callback, device_clock=None):
         from .studio.triggers import TriggerManager
         self.folder, self.adapter, self.settings = folder, adapter, settings
         self.cv = threading.Condition(threading.RLock())
@@ -76,6 +76,7 @@ class OnlineMarkers:
         self.trigger = TriggerManager(None, self.wait_echo, lambda: adapter,
                                       on_packet=packet_callback, on_status=status_callback)
         self.worker = None
+        self.device_clock = device_clock
 
     def record(self, row):
         with self.cv:
@@ -116,14 +117,18 @@ class OnlineMarkers:
     def connect(self):
         try:
             s = self.settings
-            self.trigger.connect(s['marking'], s['trigger_port'], wireless_host=s['trigger_host'],
-                                 wireless_port=s['trigger_acp_port'])
+            if s['marking'] == 'software':
+                self.trigger.connect('software')
+            else:
+                self.trigger.connect(s['marking'], s['trigger_port'], wireless_host=s['trigger_host'],
+                                     wireless_port=s['trigger_acp_port'])
             if s['marking'] == 'serial':
                 row = self.trigger.test()
                 self.record(dict(kind='trigger_self_test', **row))
             write_json(self.folder/'triggerbox.json', self.trigger.state())
-            self.worker = threading.Thread(target=self._run, daemon=True, name='online-trial-markers')
-            self.worker.start()
+            if s['marking'] != 'software':
+                self.worker = threading.Thread(target=self._run, daemon=True, name='online-trial-markers')
+                self.worker.start()
         except BaseException:
             self.trigger.disconnect()
             self.close()
@@ -133,6 +138,17 @@ class OnlineMarkers:
         row = dict(kind=kind, event_id=code, wall_time_ns=time.time_ns(),
                    mono_time_ns=time.perf_counter_ns(), verification_pending=True,
                    echo_verified=False, **detail)
+        if self.settings['marking'] == 'software':
+            from .studio.triggers import software_marker
+            row.update(software_marker(code, wall_time_ns=row['wall_time_ns'], mono_time_ns=row['mono_time_ns']),
+                       marking='software_receive_clock', dispatch_lag_ms=0.)
+            if self.device_clock is not None:
+                target = self.device_clock.estimate(row['mono_time_ns'])
+                if target is not None:
+                    row.update(device_time_ms=target, clock_alignment='minimum_observed_arrival_offset',
+                        estimated_source_index=math.ceil((target-self.device_clock.origin_ms)*self.device_clock.fs/1000))
+            self.record(row)
+            return row
         self.record(row)
         self.requests.put(row)
         return row
@@ -296,6 +312,8 @@ class PromptedControl:
             trial_id=self.current['trial_id'], label=self.current['label'],
             round=self.current['round'], target_action=self.current['target_action'],
             estimated_source_index=self.cutoff, display_ack_wall_ns=self.current['display_ack_wall_ns'])
+        self.cutoff = self.cue.get('estimated_source_index',self.cutoff)
+        self.current['source_cutoff'] = self.cutoff
         self.phase = 'marking_cue'
 
     def eligible(self, window):
@@ -339,7 +357,9 @@ class PromptedControl:
 
     def no_output(self):
         t = self.current
-        t.update(execution_status='no_output', decision_wall_ns=time.time_ns())
+        t.update(execution_status='no_output', decision_wall_ns=time.time_ns(),
+                 decision_reason='deadline_no_votes',
+                 valid_slice_count=self.gate.state.get('round_valid_slices', 0))
         self.end = self.markers.submit('task_end', 9, trial_id=t['trial_id'], label=t['label'],
                                        estimated_source_index=self.latest_source()+1)
         self.phase, self.completed_at = 'executing', time.monotonic()
@@ -402,6 +422,7 @@ class PromptedControl:
         self.finalized = True
         self.markers.close()
         stamps, n = h['device_ms'][:], len(h['device_ms'])
+        source_indices = h['source_index'][:]
         trigger = np.zeros(n, dtype=np.uint32)
         fs = self.fs
         events = copy.deepcopy(self.markers.events)
@@ -413,19 +434,26 @@ class PromptedControl:
                 if i and stamps[i]-stamps[i-1] > 1000/fs+.501 and stamps[i-1] < target < stamps[i]:
                     e['alignment'] = 'device_clock_gap'
                     continue
-                e.update(sample_index=i, alignment='device_clock_lower_bound')
-                if e['kind'] == 'device_event' and e.get('recognized'):
+                software = e.get('trigger_mode') == 'software'
+                e.update(sample_index=i, alignment='estimated_device_clock' if software else 'device_clock_lower_bound')
+                if (e['kind'] == 'device_event' and e.get('recognized')) or software:
                     if trigger[i]:
                         e['trigger_collision'] = True
                     else:
                         trigger[i] = e['event_id']
-            elif self.settings['marking'] == 'software' and e.get('kind') in ('prepare', 'cue', 'task_end'):
+            elif target is None and self.settings['marking'] == 'software' and e.get('kind') in ('prepare', 'cue', 'task_end'):
                 i = e.get('estimated_source_index')
                 if i is not None and n:
-                    k = int(np.searchsorted(h['source_index'][:], i))
+                    k = int(np.searchsorted(source_indices, i))
                     if k < n:
+                        if source_indices[k] != i:
+                            e['alignment'] = 'source_index_gap'
+                            continue
                         e.update(sample_index=k, alignment='estimated_host_receive_clock')
-                        trigger[k] = e['event_id']
+                        if trigger[k]:
+                            e['trigger_collision'] = True
+                        else:
+                            trigger[k] = e['event_id']
             if e['sample_index'] is None:
                 e.setdefault('alignment', 'unavailable')
         # Final exports replace the append-only crash journal only after all workers stop.

@@ -111,7 +111,7 @@ function drawWave(points){
   if(points.length<2){ctx.fillStyle="#93a4b1";ctx.font='12px "Microsoft YaHei", sans-serif';ctx.fillText("接收数据后显示实时波形",22,h/2);return;}
   const minTime=points[0][0],maxTime=points[points.length-1][0],ys=points.map(p=>p[1]);
   let low=Math.min(...ys),high=Math.max(...ys);const range=Math.max(1e-6,high-low);low-=range*.1;high+=range*.1;
-  ctx.strokeStyle="#15909c";ctx.lineWidth=1.4;ctx.beginPath();points.forEach((p,i)=>{const x=15+(p[0]-minTime)/Math.max(.01,maxTime-minTime)*(w-30),y=h-14-(p[1]-low)/(high-low)*(h-28);if(i)ctx.lineTo(x,y);else ctx.moveTo(x,y);});ctx.stroke();
+  ctx.strokeStyle="#15909c";ctx.lineWidth=1.4;ctx.beginPath();points.forEach((p,i)=>{const x=15+(p[0]-minTime)/Math.max(.01,maxTime-minTime)*(w-30),y=h-14-(p[1]-low)/(high-low)*(h-28);if(i&&p[0]-points[i-1][0]<=Math.max(1,Math.floor((state?.sample_rate||1000)/80))/(state?.sample_rate||1000)+.000501)ctx.lineTo(x,y);else ctx.moveTo(x,y);});ctx.stroke();
 }
 async function poll(){if(!polling||busy)return;busy=true;try{render(await api("/api/state"));}catch(e){error("页面与本机程序连接失败："+e.message);}finally{busy=false;}}
 $("participant").addEventListener("change",()=>loadParticipant().catch(e=>error(e.message)));

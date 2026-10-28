@@ -74,7 +74,7 @@ const calibrationPrompts=new CalibrationPrompts(calibrationAudio,
 const actionPrompts=new ActionPrompts(new CollectionAudio(api,()=>{}),
   p=>!!state?.running&&state.status!=='stopping'&&state.prompted?.session_id===p.session_id&&state.prompted?.prompt_id===p.prompt_id&&document.visibilityState==='visible',
   error=>{showMessage('动作提示音失败，已停止：'+error.message,true);stopDecoder().catch(e=>showMessage(e.message,true));});
-async function stopDecoder(){
+async function stopDecoder(endpoint='/api/stop'){
   if(stopRequestPending)return;
   directStartRevision++;
   stopRequestPending=true;
@@ -82,7 +82,8 @@ async function stopDecoder(){
   actionPrompts.cancel(state?.prompted?.session_id);
   if(!state?.running&&monitorRecorder.pending)monitorRecorder.stop({complete:false,reason:'开始前已取消'});
   if(state?.running)state.status='stopping';
-  updateControls();try{await api('/api/stop',{});}finally{stopRequestPending=false;updateControls();}
+  if(state&&endpoint==='/api/disconnect')state.device_connection={phase:'disconnecting',message:'正在保存记录并断开设备…'};
+  updateControls();try{return await api(endpoint,{});}finally{stopRequestPending=false;updateControls();}
 }
 function at(radius,angle){const a=angle*Math.PI/180;return{x:300+Math.cos(a)*radius,y:300+Math.sin(a)*radius};}
 function angleFor(index){return workspaceKind==='four'?[-135,135,-45,45][index]:-90+index*360/Math.max(2,classes.length);}
@@ -238,7 +239,7 @@ function decisionFields(){
   const prompted=workspaceKind==='six'&&$('collectionMode').value==='prompted';
   const timing=prompted?`回位后间隔${$('cooldown').value}秒，包含休息${$('promptRest').value}秒和预提示${$('promptPrepare').value}秒，不额外叠加。首个任务也预提示${$('promptPrepare').value}秒。正式开始后再积累完整的新脑电窗口，之后才开始投票。`:`回位后先间隔${$('cooldown').value}秒，再积累完整的新脑电窗口，之后才开始投票。`;
   text('promptTimingHint',`回位后间隔共${$('cooldown').value}秒：休息${$('promptRest').value}秒＋预提示${$('promptPrepare').value}秒。两段包含在总间隔内；总间隔可在“判决参数”中修改。`);
-  text('decisionHint',vote?`最近${$('voteWindow').value}秒的预测投票，达到${Math.round(Number($('voteRatio').value)*100)}%得票即触发；最长判决等待${$('decisionTimeout').value}秒，从本轮有效预测开始计算。超时后仍按最近窗口最高票选择，同票比较平均概率，再比较最新一票。${timing}滤波历史和改进模型的多个窗口也会计入等待。动作执行中不积票、不排队；缺少有效预测时不强行输出。`:'同类持续激活只触发一次；释放或换类后重新积累。阈值拒识不等于识别出休息。');
+  text('decisionHint',vote?`最近${$('voteWindow').value}秒的预测投票，达到${Math.round(Number($('voteRatio').value)*100)}%得票即触发；最长判决等待${$('decisionTimeout').value}秒，从本轮有效预测开始计算。超时后按本轮全部有效窗口的最高票选择，同票比较平均概率，再比较最新一票。${timing}滤波历史和改进模型的多个窗口也会计入等待。动作执行中不积票、不排队；缺少有效预测时不强行输出。`:'同类持续激活只触发一次；释放或换类后重新积累。阈值拒识不等于识别出休息。');
   text('pageSubtitle',vote?'汇总多次预测，让多数结果触发一次动作。':workspaceKind==='four'?'查看四类实时概率与稳定判决 · 仅网页显示':'观察每一次预测，让稳定的意图成为动作。');
 }
 function decisionConfig(){
@@ -309,9 +310,9 @@ async function loadDetails(){
     if(next.requires_prompted_calibration&&$('collectionMode').value==='prompted')next.requires_calibration=true;
     if(next.requires_calibration&&!Object.hasOwn(next,'previous_calibration'))throw new Error('后台正在更新，暂时无法读取校准记录，请稍后刷新。');
     details=next;
-    if(details.runtime==='mi_studio_v2')text('importStatus','v2模型使用专用校准工具；校准完成后导入calibrated.pt。');
+    if(details.runtime==='mi_studio_v2')text('importStatus',details.online_calibration_disabled?'在线校准暂时禁用，使用导入模型的现有输出头直接测试。':'v2模型使用专用校准工具；校准完成后导入calibrated.pt。');
     if(!state?.running&&appliedDefaultsModel!==details.model_id){
-      const fields=['decisionMode','voteWindow','voteRatio','decisionTimeout','cooldown','threshold','margin','stable','release','collectionMode','promptRest','promptPrepare','promptLoops','promptMarking','outputMode'];
+      const fields=['decisionMode','voteWindow','voteRatio','decisionTimeout','cooldown','threshold','margin','stable','release','collectionMode','promptRest','promptPrepare','promptLoops','outputMode'];
       for(const id of fields)if(Object.hasOwn(details.ui_defaults||{},id))$(id).value=details.ui_defaults[id];
       if(Object.hasOwn(details.ui_defaults||{},'calibrationSound'))$('calibrationSound').checked=!!details.ui_defaults.calibrationSound;
       appliedDefaultsModel=details.model_id;promptedFields();decisionFields();outputFields();
@@ -332,6 +333,7 @@ async function loadDetails(){
 function promptedFields(){
   const on=workspaceKind==='six'&&['six','acp'].includes($('mode').value)&&$('collectionMode').value==='prompted';
   $('promptedFields').hidden=!on;$('promptHardware').hidden=$('promptMarking').value!=='serial';
+  $('promptSoftwareHint').hidden=$('promptMarking').value!=='software';
   $('promptWirelessFields').hidden=!$('promptWireless').checked;
 }
 function syncPromptTiming(source){
@@ -349,7 +351,8 @@ function promptedConfig(){
   if(enabled&&Math.abs(Number($('cooldown').value)-rest-prepare)>1e-6)throw new Error('回位后间隔须等于休息时间与预提示时间之和，请检查这三个设置。');
   return{enabled,loops:Number($('promptLoops').value),rest_seconds:rest,prepare_seconds:prepare,
   seed:$('promptSeed').value.trim()===''?null:Number($('promptSeed').value),marking:$('promptMarking').value,
-  trigger_port:$('promptPort').value,trigger_host:$('promptWireless').checked?$('promptDevice').value:''};}
+  trigger_port:$('promptMarking').value==='serial'?$('promptPort').value:'',
+  trigger_host:$('promptMarking').value==='serial'&&$('promptWireless').checked?$('promptDevice').value:''};}
 function requestConfig(){return{participant:$('participant').value,model_id:$('model').value,mode:$('mode').value,host:$('host').value.trim(),port:Number($('port').value),prompted:promptedConfig(),
   calibration_mode:usesPreviousCalibration()?'reuse':'new',calibration_source:usesPreviousCalibration()?selectedCalibration()?.id:undefined,
   calibration_audio:!!details?.requires_calibration&&!usesPreviousCalibration()&&$('calibrationSound').checked,output:outputConfig(),hand_actions:[...$('mapping').querySelectorAll('select')].map(e=>e.value),decision:decisionConfig()};}
@@ -393,10 +396,19 @@ function calibrationChoiceChanged(){
 async function action(button,fn){if(busy)return;busy=true;button.disabled=true;clearMessages();try{await fn();}catch(e){showMessage(e.message,true);}finally{busy=false;updateControls();if(triggerSearchPending)setTimeout(searchTriggerDevices,0);}}
 function updateControls(){
   const running=!!state?.running;
-  const testing=['testing','cancelling'].includes(state?.eeg_connection_test?.phase)||state?.eeg_discovery?.phase==='searching'||['testing','cancelling'].includes(state?.trigger_connection_test?.phase)||state?.trigger_discovery?.phase==='searching';
+  const calibrationDisabled=!!details?.online_calibration_disabled;
+  $('onlineCalibrationNotice').hidden=!calibrationDisabled;
+  if(calibrationDisabled)text('onlineCalibrationNotice',details.calibration_notice);
+  $('modelCalibrationTool').hidden=calibrationDisabled||!details;
+  $('calibrationDataImport').hidden=calibrationDisabled||!details;
+  const disconnecting=state?.device_connection?.phase==='disconnecting';
+  const testing=disconnecting||['testing','cancelling'].includes(state?.eeg_connection_test?.phase)||state?.eeg_discovery?.phase==='searching'||['testing','cancelling'].includes(state?.trigger_connection_test?.phase)||state?.trigger_discovery?.phase==='searching';
+  $('disconnectDevices').disabled=disconnecting||stopRequestPending||offline;
+  $('disconnectDevices').textContent=disconnecting?'正在断开…':'断开连接';
+  text('deviceConnectionStatus',state?.device_connection?.message||'断开时停止采集并保存记录，释放设备连接。');
   const deviceReady=!['six','four','acp'].includes($('mode').value)||!!$('host').value;
   for(const id of ['importParticipant','importName','importFile','importModel'])$(id).disabled=running||testing||busy||offline;
-  for(const id of ['calibrationImportFolder','calibrationImportZip','importCalibration'])$(id).disabled=running||testing||busy||offline||!details||details.runtime==='mi_studio_v2'||!['six','acp'].includes($('mode').value);
+  for(const id of ['calibrationImportFolder','calibrationImportZip','importCalibration'])$(id).disabled=calibrationDisabled||running||testing||busy||offline||!details||details.runtime==='mi_studio_v2'||!['six','acp'].includes($('mode').value);
   const handReady=$('outputMode').value!=='inspire'||!!$('handPort').value;
   for(const id of editable)$(id).disabled=running||testing||busy||offline;
   for(const input of document.querySelectorAll('#mapping select, #calibrationPanel input, #calibrationPanel select, #calibrationPanel button'))input.disabled=running||testing||busy||offline;
@@ -406,7 +418,7 @@ function updateControls(){
   $('start').disabled=running||testing||busy||monitorRecordingSaving||!details||!deviceReady||!handReady||!triggerReady||!calibrationReady||offline;
   $('recordingOptions').hidden=workspaceKind!=='six';
   $('start').textContent=prompted?'▶ 打开解码任务窗口':'▶ 开始解码';
-  $('startCalibration').disabled=running||testing||busy||monitorRecordingSaving||!details?.requires_calibration||!deviceReady||offline;
+  $('startCalibration').disabled=calibrationDisabled||running||testing||busy||monitorRecordingSaving||!details?.requires_calibration||!deviceReady||offline;
   text('decodeStartHint',!calibrationReady?'先完成上方脑电校准，或选择使用上次完整校准。':prompted?'先打开任务窗口并移到扩展屏，在新窗口点击“开始解码”后才连接设备。本页保留实时解码显示。':workspaceKind==='six'?'自由持续解码直接在本页开始，显示圆盘、实时概率和脑电波形，不显示或播报目标提示。':'直接在本页开始四分类解码，仅网页显示。');
   text('recordingHint',prompted?'可选。任务窗口点击开始后选择显示圆盘和波形的主屏；需要语音时勾选“共享系统音频”。解码结束后自动保存到本机。':'可选。点击本页“开始解码”时选择要录制的展示屏；解码结束后自动保存到本机。');
   $('check').disabled=running||testing||busy||!details||!deviceReady||offline;
@@ -423,6 +435,9 @@ function updateControls(){
 
 }
 function renderBrainCalibration(){
+  if(details?.online_calibration_disabled){
+    $('brainCalibration').hidden=true;document.body.classList.remove('calibration-focus');return;
+  }
   const c=state?.calibration, active=!!state?.running&&c?.required, focus=active&&!c.ready;
   const selected=details?.requires_calibration;
   document.body.classList.toggle('calibration-focus',!!focus);
@@ -498,7 +513,7 @@ function renderPrompted(){
   const resting=p.phase==='executing';
   text('promptedTarget',resting?'休息':p.task_text|| (p.phase==='complete'?'本次采集完成':'等待目标提示'));
   text('promptedTask',resting||p.phase==='complete'?'':p.target_action?`机械手：${handActions[p.target_action]||p.target_action}`:'先完成设备检查与所选模型的脑电校准。');
-  const labels={connecting:'正在连接设备与核验TriggerBox',waiting_stream:'脑电暂缓，保持连接等待恢复',waiting_calibration:'等待脑电校准完成',awaiting_display:'保持本次运动想象',marking_cue:'保持本次运动想象',cue_hold:'保持本次运动想象',decoding:'保持本次运动想象',executing:'放松休息',complete:'全部试次完成，正在保存数据'};
+  const labels={connecting:p.marking==='software'?'正在连接脑电设备 · 软件打标无需TriggerBox':'正在连接设备与核验TriggerBox',waiting_stream:'脑电暂缓，保持连接等待恢复',waiting_calibration:'等待脑电校准完成',awaiting_display:'保持本次运动想象',marking_cue:'保持本次运动想象',cue_hold:'保持本次运动想象',decoding:'保持本次运动想象',executing:'放松休息',complete:'全部试次完成，正在保存数据'};
   text('promptedStatus',`${p.round?'第'+p.round+'轮 · ':''}${!state.running?'会话已停止，记录已保存':labels[p.phase]||p.phase}${p.marking==='software'?' · 软件估计标记':''}${state.output_mode!=='inspire'?' · 机械手模拟':''}`);
   const promptSession=p.session_id,promptId=p.prompt_id,key=promptSession+':'+promptId;
   if(!state.subject_window_id&&state.running&&state.status!=='stopping'&&p.phase==='awaiting_display'&&p.prompt_id&&key!==acknowledgedPrompt&&key!==pendingPrompt&&document.visibilityState==='visible'){
@@ -549,10 +564,13 @@ function update(s){
   text('decisionReason',s.gate?.reason||'等待开始持续解码');text('progressValue',active?`${Math.round(progress*100)}%${s.gate?.mode==='vote'?' 得票':''}`:'—');
   text('predictedClass',top!==null?decodeLabels[top]||decodeLabel(classes[top]):'—');text('topProbability',max===null?'—':(max*100).toFixed(1));text('predictionLive',s.phase==='calibrating'?'校准中 · 暂无预测':s.running?'● 连续更新':'等待输入');
   text('wallTime',timeLabel(s.wall_seconds));text('predictionCount',String(s.n_predictions));
-  text('inputRate',s.rate_hz===null||s.rate_hz===undefined?'—':`${Math.round(s.rate_hz)} Hz`);
+  text('inputRate',s.rate_hz===null||s.rate_hz===undefined?'—':`${Math.round(s.rate_hz)} 点/s`);
   text('rateNote',s.mode==='demo'?'演示模式无脑电输入':`标称 ${s.expected_rate??details?.sample_rate??'—'} Hz · 收到 ${s.samples_received} 点`);
   text('inferenceNote',s.mode==='demo'?'演示概率 · 非模型推理':s.inference_ms==null?'等待模型窗口':`单次处理 ${s.inference_ms.toFixed(1)} ms`);
-  text('gapCount',s.mode==='demo'?'—':String(s.gap_count));text('gapNote',s.mode==='demo'?'真实数据模式监测':s.stale_seconds>.4?`最近 ${s.stale_seconds.toFixed(1)} s 无新数据`:`数据时长 ${(s.source_seconds||0).toFixed(1)} s`);
+  text('gapCount',s.mode==='demo'?'—':String(s.gap_count));text('gapNote',s.mode==='demo'?'真实数据模式监测':s.stale_seconds>.4?`接收暂停 ${s.stale_seconds.toFixed(1)} s，等待补到`:`设备时间 ${(s.source_seconds||0).toFixed(1)} s · 传输延迟约 ${Math.round(s.stream_timing?.device_timeline?.transport_delay_ms||0)} ms`);
+  const quality=s.stream_quality||{}, loss=$('streamLossStatus');
+  loss.hidden=s.mode==='demo'||!(quality.loss_events||quality.corrupt_events||quality.recovering);
+  loss.textContent=`${quality.recovering?'接收异常：正在等待不含缺口的完整窗口':'接收已恢复：完整窗口正常参与投票'} · 缺口 ${quality.loss_events||0} 次，校验异常 ${quality.corrupt_events||0} 次，已知缺失 ${quality.missing_samples||0} 点。原始脑电持续保存，含缺口的 slice 剔除；本轮有效票保留${s.gate?.round_valid_slices!==undefined?`（${s.gate.round_valid_slices} 个有效窗口）`:''}${s.gate?.decision_remaining_seconds!==undefined?`，倒计时 ${s.gate.decision_remaining_seconds.toFixed(1)} 秒`:''}。`;
   const count=s.command_count||0; text('commandCount',String(count).padStart(2,'0'));
   const latest=s.commands?.at(-1);
   const handAction=hand.busy&&['executing','holding'].includes(hand.phase)?latest?.hand_action:null;for(const key of Object.keys(handActions))$('handDrawing').classList.toggle('pose-'+key,!four&&handAction===key);
@@ -652,7 +670,7 @@ function renderWaveInfo(){
   }else phase=s.phase==='warming'?'积累脑电窗口':'解码';
   text('wavePhase',phase);
   const band=wf?.bandpass_hz,filter=band?`显示滤波 ${band[0]}–${band[1]} Hz${wf.notch_hz?' · '+wf.notch_hz+' Hz陷波':''}`:'等待信号';
-  text('waveHint',s.mode==='demo'?'交互演示不生成或伪装脑电波形。':`C3 · Cz · C4 · 最近5秒 · ${filter}`);
+  text('waveHint',s.mode==='demo'?'交互演示不生成或伪装脑电波形。':`C3 · Cz · C4 · 设备采样时间最近5秒 · ${filter}`);
 }
 function drawWave(){
   const canvas=$('wave'),w=canvas.clientWidth,h=canvas.clientHeight,dpr=window.devicePixelRatio||1;
@@ -676,10 +694,11 @@ function drawWave(){
     if(!wf.available?.includes(name)||source<0||points.length<2){
       ctx.fillStyle='#78959e';ctx.font='12px sans-serif';ctx.fillText(wf.available?.includes(name)?'等待信号':'未接入',left+56,center+4);return;
     }
-    let drawing=false,clipped=false;ctx.strokeStyle=color;ctx.lineWidth=1.3;ctx.beginPath();
+    let drawing=false,clipped=false,previousTime=null;ctx.strokeStyle=color;ctx.lineWidth=1.3;ctx.beginPath();
     for(const p of points){
       const value=p[source+1];if(value===null||!Number.isFinite(value)){drawing=false;continue;}
-      clipped ||= Math.abs(value)>scale;
+      if(previousTime!==null&&p[0]-previousTime>1/(wf.display_sample_rate||200)+.000501)drawing=false;
+      previousTime=p[0];clipped ||= Math.abs(value)>scale;
       const x=left+(p[0]-(end-5))/5*(right-left),y=center-Math.max(-scale,Math.min(scale,value))/scale*half;
       if(!drawing)ctx.moveTo(x,y);else ctx.lineTo(x,y);drawing=true;
     }
@@ -804,6 +823,12 @@ async function searchEegDevices(){
 }
 $('discoverEEG').addEventListener('click',searchEegDevices);
 $('eegDevice').addEventListener('change',selectEegDevice);
+$('disconnectDevices').addEventListener('click',async()=>{
+  clearMessages();
+  try{const result=await stopDecoder('/api/disconnect');if(result){if(state)state.device_connection=result.device_connection;showMessage(result.device_connection.message);}}
+  catch(e){showMessage(e.message,true);}
+  finally{updateControls();}
+});
 $('checkEEG').addEventListener('click',()=>action($('checkEEG'),async()=>{
   text('eegCheckResult','正在连接设备并检查约2秒的连续脑电数据…');
   try{

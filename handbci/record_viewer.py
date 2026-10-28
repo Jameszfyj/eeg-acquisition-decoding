@@ -19,7 +19,7 @@ def _lower_bound(dataset, value):
     lo, hi = 0, len(dataset)
     while lo < hi:
         middle = (lo + hi) // 2
-        if int(dataset[middle]) < value:
+        if dataset[middle] < value:
             lo = middle + 1
         else:
             hi = middle
@@ -108,10 +108,27 @@ class RecordStore:
             if last < first:
                 raise ValueError("采样索引发生重置，请先检查原始记录。")
             events = [json.loads(event) for event in handle["events_json"].asstr()[:]]
+            device_origin = None
+            if 'device_time_ms' in handle:
+                clock = handle['device_time_ms']
+                device_origin = float(clock[0])
+                first, last = 0, round((float(clock[-1])-device_origin)*fs/1000)
+                for event in events:
+                    stamp = event.get('device_time_ms')
+                    index = event.get('sample_index')
+                    if stamp is None and index is not None and 0 <= int(index) <= n:
+                        stamp = float(clock[int(index)]) if int(index)<n else float(clock[-1])+1000/fs
+                    event['viewer_seconds'] = (stamp-device_origin)/1000 if stamp is not None else None
+            else:
+                for event in events:
+                    index = event.get('sample_index')
+                    event['viewer_seconds'] = (int(index)-first)/fs if index is not None else None
             complete = bool(meta.get("complete") and handle.attrs.get("complete", False))
         classes = {int(c["id"]): c for c in cfg.get("classes", [])}
         starts, trials = {}, []
         for event in events:
+            if event['viewer_seconds'] is None:
+                continue
             trial_id = event.get("trial_id")
             if event.get("kind") == "cue":
                 starts[trial_id] = event
@@ -120,17 +137,18 @@ class RecordStore:
                 c = classes.get(begin.get("label"), {})
                 trials.append({"id": trial_id, "label": begin.get("label"),
                                "task": c.get("task_text", "未知任务"),
-                               "start": (int(begin["sample_index"]) - first) / fs,
-                               "end": (int(event["sample_index"]) - first) / fs, "complete": True})
+                               "start": begin['viewer_seconds'],
+                               "end": event['viewer_seconds'], "complete": True})
         for trial_id, begin in starts.items():
             trials.append({"id": trial_id, "label": begin.get("label"),
                            "task": classes.get(begin.get("label"), {}).get("task_text", "未知任务"),
-                           "start": (int(begin["sample_index"]) - first) / fs, "end": None, "complete": False})
+                           "start": begin['viewer_seconds'], "end": None, "complete": False})
         return {"id": identity, "path": str(path), "participant": str(cfg.get("session_metadata", {}).get("participant_id", "未填写")),
                 "source": meta.get("source", "unknown"), "complete": complete, "error": meta.get("error", ""),
                 "description": cfg.get("description", ""), "channels": device["channels"],
                 "unit": device.get("unit", "unknown"), "sample_rate": fs, "samples": n,
                 "duration": (last - first + 1) / fs, "origin_index": first,
+                "device_origin_ms": device_origin, "time_axis": 'device_sample_time' if device_origin is not None else 'source_sample_index',
                 "classes": list(classes.values()), "trials": sorted(trials, key=lambda row: row["start"]),
                 "marking_types": sorted({e.get("marking", "unknown") for e in events})}
 
@@ -148,12 +166,14 @@ class RecordStore:
         fs, origin = info["sample_rate"], info["origin_index"]
         traces = []
         with h5py.File(self.path(identity) / "data.h5", "r") as handle:
-            indices = handle["source_indices"]
-            left = _lower_bound(indices, math.ceil(start * fs + origin - 1e-7))
-            right = _lower_bound(indices, math.ceil(end * fs + origin - 1e-7))
+            device_origin = info.get('device_origin_ms')
+            indices = handle['device_time_ms'] if device_origin is not None else handle['source_indices']
+            left = _lower_bound(indices, device_origin+start*1000 if device_origin is not None else math.ceil(start*fs+origin-1e-7))
+            right = _lower_bound(indices, device_origin+end*1000 if device_origin is not None else math.ceil(end*fs+origin-1e-7))
             if right - left < 2:
                 raise ValueError("所选区间少于两个采样点，请扩大时间范围。")
-            source_indices = np.asarray(indices[left:right], dtype=np.int64)
+            source_indices = (np.rint((np.asarray(indices[left:right])-device_origin)*fs/1000).astype(np.int64)
+                              if device_origin is not None else np.asarray(indices[left:right],dtype=np.int64))
             gaps = int(np.count_nonzero(np.diff(source_indices) != 1))
             if np.any(np.diff(source_indices) <= 0):
                 raise ValueError("此区间采样索引有重置或倒序，无法按连续时间绘制。")

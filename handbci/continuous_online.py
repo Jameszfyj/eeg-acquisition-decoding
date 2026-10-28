@@ -37,6 +37,10 @@ from .workbench_settings import local_settings, local_path, model_preferences
 
 ROOT = Path(__file__).resolve().parents[1]
 DEMO_ID = "probability-demo-v1"
+# Temporary software-debug policy. Offline training/calibration tools keep their
+# own contracts; the online workbench must never collect or fit calibration.
+ONLINE_CALIBRATION_ENABLED = False
+CALIBRATION_DISABLED_MESSAGE = '软件调试期间，在线脑电校准暂时禁用；所有模型可直接测试，已有模型参数保持不变。'
 DEMO_CLASSES = [{"id": i, "name": f"任务{i+1:02d}", "task_text": f"任务{i+1:02d}（人工概率）",
                  "action": f"slot_{i+1}", "hand_action": key, "action_name": ACTION_LABELS[key]}
                 for i, key in enumerate(ACTION_CHANNELS)]
@@ -140,8 +144,8 @@ class ContinuousGate:
 class VotingGate(ContinuousGate):
     """Fresh rolling votes; every completed action can be followed by the same class.
 
-    The timeout selects the plurality of recent predictions, not an invented label.
-    Movement, cooldown, invalid predictions and stream gaps discard accumulated votes.
+    Early decisions use rolling votes; timeout uses all valid slices in the round.
+    Packet loss never erases valid evidence or moves the round's deadline.
     """
     def __init__(self, n_classes, vote_window_seconds=2., vote_ratio=.65,
                  decision_timeout_seconds=3.5, cooldown_seconds=4., max_gap_seconds=.5):
@@ -151,6 +155,7 @@ class VotingGate(ContinuousGate):
         self.ratio = number(vote_ratio, '得票比例', .5, 1)
         self.timeout = number(decision_timeout_seconds, '最长判决等待', self.window, 20)
         self.votes = deque()
+        self.round_votes = []
         self.round_started = None
         self.state = dict(mode='vote', candidate=None, progress=0., reason='等待预测', latched=None)
 
@@ -162,6 +167,7 @@ class VotingGate(ContinuousGate):
     def reset_candidate(self):
         super().reset_candidate()
         self.votes.clear()
+        self.round_votes.clear()
         self.round_started = None
 
     def _waiting(self, reason):
@@ -172,8 +178,6 @@ class VotingGate(ContinuousGate):
         if not math.isfinite(now) or (self.last_time is not None and now < self.last_time):
             raise ValueError('判决时钟无效或倒退。')
         previous = self.last_time
-        if previous is not None and now-previous > self.max_gap:
-            self.reset_candidate()
         self.last_time = now
         p = np.asarray(probabilities, dtype=float)
         valid = (p.shape == (self.n_classes,) and np.all(np.isfinite(p)) and
@@ -192,36 +196,57 @@ class VotingGate(ContinuousGate):
         # Exact top ties abstain instead of systematically voting for class zero.
         winner = top if p[top]-second > 1e-6 else None
         self.votes.append((now, winner, p.copy()))
+        self.round_votes.append((now, winner, p.copy()))
+        return self.tick(now, allow_majority=True)
+
+    def start_round(self, now):
+        """A discarded slice can start an empty round without supplying a vote."""
+        if self.round_started is None and now-self.last_command+1e-9 >= self.cooldown:
+            self.round_started = now
+
+    def tick(self, now, *, allow_majority=False):
+        if self.round_started is None:
+            return None
+        wait = now-self.round_started
+        if not math.isfinite(now) or wait < 0:
+            raise ValueError('判决时钟无效或倒退。')
+        deadline = wait+1e-9 >= self.timeout
         while self.votes and self.votes[0][0] < now-self.window-1e-9:
             self.votes.popleft()
+        rows = self.round_votes if deadline else self.votes
         counts = np.zeros(self.n_classes, dtype=int)
         latest = np.full(self.n_classes, -float('inf'))
-        for stamp, vote, _ in self.votes:
+        for stamp, vote, _ in rows:
             if vote is not None:
                 counts[vote] += 1
                 latest[vote] = stamp
-        means = np.mean([row[2] for row in self.votes], axis=0)
+        means = np.mean([row[2] for row in rows], axis=0) if rows else np.zeros(self.n_classes)
         candidates = np.flatnonzero(counts)
         candidate = (max(map(int, candidates), key=lambda i: (counts[i], means[i], latest[i]))
                      if len(candidates) else None)
-        total = len(self.votes)
+        total = len(rows)
         share = float(counts[candidate]/total) if candidate is not None else 0.
-        wait = now-self.round_started
         ready = wait+1e-9 >= self.window and int(counts.sum()) >= 3
-        deadline = wait+1e-9 >= self.timeout
         reason = ('预测未分出类别 · 等待新证据' if candidate is None else
                   f'投票 {counts[candidate]}/{total} · 正在收集预测' if not ready else
                   f'投票 {counts[candidate]}/{total} · 等待多数')
         self.candidate = candidate
         self.state = dict(mode='vote', candidate=candidate, progress=share, reason=reason,
                           latched=None, votes=counts.tolist(), vote_total=total,
-                          vote_share=share, decision_wait_seconds=wait)
-        if ready and (share+1e-9 >= self.ratio or deadline):
-            decision_reason = 'majority' if share+1e-9 >= self.ratio else 'deadline_plurality'
+                          vote_share=share, decision_wait_seconds=wait,
+                          decision_remaining_seconds=max(0., self.timeout-wait),
+                          round_valid_slices=len(self.round_votes))
+        if deadline and candidate is None:
+            self.state.update(reason='倒计时结束 · 无有效类别票，本轮不输出', decision_reason='deadline_no_votes')
+            self.reset_candidate()
+            return None
+        if candidate is not None and (deadline or (allow_majority and ready and share+1e-9 >= self.ratio)):
+            decision_reason = 'deadline_plurality' if deadline else 'majority'
             event = dict(class_id=candidate, confidence=float(means[candidate]), time_seconds=now,
                          decision_mode='vote', decision_reason=decision_reason,
                          vote_counts=counts.tolist(), vote_total=total, vote_share=share,
                          decision_wait_seconds=wait, vote_window_seconds=self.window,
+                         vote_scope='all_valid_slices_in_round' if deadline else 'rolling_window',
                          mean_probabilities=means.tolist())
             self.last_command = now
             self.state.update(reason='多数票已触发' if decision_reason == 'majority'
@@ -236,6 +261,9 @@ class ContinuousController(OnlineController):
 
     def __init__(self, output_root=ROOT / "runtime/continuous", **kwargs):
         super().__init__(output_root, **kwargs)
+        from .device_timeline import PIPELINE_REVISION
+        self.state['pipeline_revision'] = PIPELINE_REVISION
+        self.live_device_clock = None
         self.waveform_preview = WaveformPreview()
         self.target = None
         self.auto_demo = True
@@ -259,6 +287,7 @@ class ContinuousController(OnlineController):
         self.eeg_probe_cancel = threading.Event()
         self.eeg_probe_done = threading.Event()
         self.eeg_probe_done.set()
+        self.disconnect_pending = False
         from .eeg_connection import discovery_hosts
         self.eeg_hosts_path = self.output_root/'eeg_discovery_hosts.json'
         try:
@@ -270,16 +299,51 @@ class ContinuousController(OnlineController):
         self.state.update(classes=copy.deepcopy(DEMO_CLASSES), mode="demo", gate={}, wall_seconds=0.,
                           source_seconds=0., rate_hz=None, expected_rate=None, gap_count=0,
                           stale_seconds=0., saved_path="", physical_action=False, output_mode="simulation", hand=idle_state())
+        self.state['stream_quality'] = dict(loss_events=0, corrupt_events=0, missing_samples=0, recovering=False)
 
     def hand_ports(self):
         return load_hand_class().ports()
 
     def snapshot(self, *, browser_seen=False):
         with self.condition:
+            self._finish_disconnect()
             result = super().snapshot(browser_seen=browser_seen)
             result["manual_hand"] = self.manual_hand.snapshot()
             result['waveform'] = self.waveform_preview.snapshot()
             return result
+
+    def _finish_disconnect(self):
+        """Called under the controller lock; never claim closure before cleanup."""
+        if not self.disconnect_pending:
+            return
+        if (self.eeg_probe_busy or not self.eeg_probe_done.is_set() or self.eeg_discovery_busy
+                or (self.worker is not None and self.worker.is_alive())
+                or (self.manual_hand.worker is not None and self.manual_hand.worker.is_alive())):
+            return
+        self.disconnect_pending = False
+        self.hand_probe = None
+        message = ('设备已断开；会话存在异常，请查看错误及已保留记录。' if self.state.get('error') else
+                   '设备已断开；当前记录已保存，可重新开始。' if self.state.get('saved_path') else
+                   '设备已断开，可重新开始。')
+        self.state.update(running=False, probabilities=[],
+            device_connection=dict(phase='disconnected', message=message),
+            gate=dict(candidate=None, progress=0., reason='设备已断开'))
+
+    def _require_connection_ready(self):
+        self._finish_disconnect()
+        if self.disconnect_pending:
+            raise ValueError('正在保存记录并断开设备，请等待显示“设备已断开”后再开始。')
+        self.state['device_connection'] = dict(phase='idle', message='连接在开始采集或检验时建立。')
+
+    def disconnect_devices(self):
+        with self.condition:
+            if not self.disconnect_pending:
+                self.disconnect_pending = True
+                self.state['device_connection'] = dict(phase='disconnecting',
+                    message='正在停止采集与连接检验、保存记录并释放设备…')
+            self.stop()
+            self._finish_disconnect()
+            return dict(ok=True, device_connection=copy.deepcopy(self.state['device_connection']))
 
     def browser_snapshot(self, subject_window_id=None):
         # A monitor window must not keep a missing task display alive.
@@ -304,6 +368,7 @@ class ContinuousController(OnlineController):
 
     def start_hand_test(self, request):
         with self.condition:
+            self._require_connection_ready()
             if self.eeg_probe_busy or self.eeg_discovery_busy:
                 raise ValueError('设备搜索或连接检验正在进行，请等待完成。')
             if self.worker is not None and self.worker.is_alive():
@@ -319,6 +384,7 @@ class ContinuousController(OnlineController):
         # This endpoint only opens, reads telemetry and closes. It never calls move/set_*.
         options = connection_options(request)
         with self.condition:
+            self._require_connection_ready()
             if self.eeg_probe_busy or self.eeg_discovery_busy:
                 raise ValueError('设备搜索或连接检验正在进行，请等待完成。')
             if self.worker is not None and self.worker.is_alive():
@@ -371,6 +437,9 @@ class ContinuousController(OnlineController):
             details['hand_mapping_revision'] = 'local:' + json.dumps(mapping, separators=(',', ':'))
             details['hand_mapping_reset_all'] = True
         details['ui_defaults'] = preferences.get('ui_defaults', {})
+        if not ONLINE_CALIBRATION_ENABLED:
+            details.update(online_calibration_disabled=True, calibration_notice=CALIBRATION_DISABLED_MESSAGE,
+                           requires_calibration=False, requires_prompted_calibration=False)
         return details
 
     def _model_details(self, participant, model_id):
@@ -460,6 +529,13 @@ class ContinuousController(OnlineController):
         return result
 
     def prepare(self, request):
+        if not ONLINE_CALIBRATION_ENABLED:
+            if request.get('session_purpose') == 'calibration':
+                raise ValueError(CALIBRATION_DISABLED_MESSAGE)
+            # Reusing historical raw EEG fits new parameters too. Ignore stale
+            # page choices; only parameters already bound to the model survive.
+            request = {k:v for k,v in request.items() if k not in ('calibration_mode','calibration_source')}
+            request['calibration_audio'] = False
         mode = request.get("mode", "demo")
         if mode not in ("demo", "simulated", "acp", "four", "six"):
             raise ValueError("未知数据来源。")
@@ -488,7 +564,7 @@ class ContinuousController(OnlineController):
             cfg['device'].update(host=host, port=int(port))
             classes = self.display_classes(cfg['classes'], request.get('actions') if mode == 'six' else None,
                                            request.get('hand_actions', model_preferences(request['model_id']).get('hand_actions')) if mode == 'six' else None)
-            if selection.get('requires_calibration'):
+            if ONLINE_CALIBRATION_ENABLED and selection.get('requires_calibration'):
                 calibration_mode = request.get('calibration_mode', 'new')
                 if calibration_mode not in ('new', 'reuse'):
                     raise ValueError('请选择使用上次校准或重新校准。')
@@ -528,12 +604,12 @@ class ContinuousController(OnlineController):
                 if cfg["device"]["port"] == 8712:
                     raise ValueError("8712不是ACP端口。")
             classes = self.display_classes(cfg["classes"], request.get("actions"), request.get("hand_actions"))
-            needs_calibration = mode == 'acp' and (request.get('session_purpose') == 'calibration'
+            needs_calibration = ONLINE_CALIBRATION_ENABLED and mode == 'acp' and (request.get('session_purpose') == 'calibration'
                 or request.get('prompted', {}).get('enabled')
                 or (request.get('calibration_mode') == 'reuse' and request.get('calibration_source'))
                 or selection.get('runtime')=='retrained_six')
             if selection.get('runtime')=='mi_studio_v2':
-                if not selection.get('studio_calibration_ready'):
+                if ONLINE_CALIBRATION_ENABLED and not selection.get('studio_calibration_ready'):
                     raise ValueError('v2模型请先在专用校准工具完成校准，再导入calibrated.pt。')
                 if request.get('session_purpose')=='calibration':
                     raise ValueError('v2模型使用专用特征分类头校准，请打开MI Studio v2。')
@@ -568,6 +644,14 @@ class ContinuousController(OnlineController):
                 if not isinstance(sound,bool):
                     raise ValueError('校准语音设置须为开关。')
                 cfg['session_metadata']['calibration_audio_enabled'] = sound and calibration_mode == 'new'
+        if not ONLINE_CALIBRATION_ENABLED:
+            selection.update(model_requires_calibration=bool(selection.get('requires_calibration')),
+                             requires_calibration=False, online_calibration_disabled=True,
+                             calibration_notice=CALIBRATION_DISABLED_MESSAGE)
+            if cfg is not None:
+                cfg.setdefault('session_metadata', {}).pop('calibration_reuse', None)
+                cfg.setdefault('session_metadata', {}).update(online_calibration_disabled=True,
+                    calibration_audio_enabled=False, online_calibration_policy='disabled_for_software_debug')
         settings = request.get("decision", {})
         if not isinstance(settings, dict):
             raise ValueError("判决设置格式无效。")
@@ -623,6 +707,7 @@ class ContinuousController(OnlineController):
 
     def check_eeg_connection(self, request):
         with self.condition:
+            self._require_connection_ready()
             if self.eeg_probe_busy or self.eeg_discovery_busy or (self.worker is not None and self.worker.is_alive()):
                 raise ValueError('正在测试连接、解码或保存，请等待当前操作结束。')
             self.eeg_probe_busy = True
@@ -662,6 +747,7 @@ class ContinuousController(OnlineController):
 
     def discover_trigger_devices(self, request=None):
         with self.condition:
+            self._require_connection_ready()
             if self.eeg_probe_busy or self.eeg_discovery_busy or (self.worker is not None and self.worker.is_alive()):
                 raise ValueError('正在搜索、测试或解码，请等待当前操作结束。')
             self.eeg_discovery_busy = True
@@ -682,6 +768,7 @@ class ContinuousController(OnlineController):
 
     def check_trigger_connection(self, request):
         with self.condition:
+            self._require_connection_ready()
             if (self.eeg_probe_busy or self.eeg_discovery_busy or self.manual_hand.snapshot()['busy']
                     or (self.worker is not None and self.worker.is_alive())):
                 raise ValueError('正在搜索、测试或解码，请等待当前操作结束。')
@@ -698,8 +785,14 @@ class ContinuousController(OnlineController):
                 raise ValueError('动作输出设置格式无效。')
             from .prompted_control import validate_settings
             settings = validate_settings(request.get('prompted'), mode, classes, gate, output)
-            if not settings['enabled'] or settings['marking'] != 'serial':
-                raise ValueError('请先选择带提示采集和USB TriggerBox。')
+            if not settings['enabled']:
+                raise ValueError('请先选择带提示采集。')
+            if settings['marking'] == 'software':
+                result = dict(ready=True, mode='software', echo_verified=False, physical_hardware=False,
+                              message='软件标记已就绪；指令发出时记录，无需TriggerBox或回传自检。')
+                with self.condition:
+                    self.state['trigger_connection_test'] = dict(phase='completed', **result)
+                return result
             if settings['trigger_host'] == cfg['device']['host']:
                 raise ValueError('TriggerBox数据设备不能与脑电设备相同。')
             from .trigger_probe import run_trigger_check
@@ -720,6 +813,7 @@ class ContinuousController(OnlineController):
 
     def discover_eeg_devices(self, request=None):
         with self.condition:
+            self._require_connection_ready()
             if self.eeg_probe_busy or self.eeg_discovery_busy or (self.worker is not None and self.worker.is_alive()):
                 raise ValueError('正在搜索、测试或解码，请等待当前操作结束。')
             self.eeg_discovery_busy = True
@@ -743,6 +837,8 @@ class ContinuousController(OnlineController):
                 self.eeg_discovery_busy = False
 
     def start_calibration(self, request):
+        if not ONLINE_CALIBRATION_ENABLED:
+            raise ValueError(CALIBRATION_DISABLED_MESSAGE)
         # Calibration is a separate EEG-only session. Do not even validate or
         # open the hand/TriggerBox supplied by the decode configuration.
         payload = {k:request[k] for k in ('participant','model_id','mode','host','port',
@@ -762,6 +858,7 @@ class ContinuousController(OnlineController):
 
     def start(self, request):
         with self.condition:
+            self._require_connection_ready()
             if self.eeg_probe_busy or self.eeg_discovery_busy:
                 raise ValueError('脑电连接测试正在进行，请等待测试结束后再开始解码。')
             if self.manual_hand.snapshot()["busy"]:
@@ -817,6 +914,7 @@ class ContinuousController(OnlineController):
             self.motion_completed_at = None
             self.fresh_collection_after = None
             self.fresh_source_cutoff = None
+            self.live_device_clock = None
             self.simulation_motion = None
             self.calibration_decoder = None
             self.session_purpose = purpose
@@ -833,7 +931,8 @@ class ContinuousController(OnlineController):
                           "samples_received": 0, "n_predictions": 0, "commands": [], "probabilities": [],
                           "phase": "warming", "inference_ms": None, "report": None,
                           "calibration": {"required": bool(selection.get('requires_calibration')),
-                              "ready": bool(selection.get('calibration_reuse')),
+                              "ready": not ONLINE_CALIBRATION_ENABLED or bool(selection.get('calibration_reuse')),
+                              "disabled": not ONLINE_CALIBRATION_ENABLED,
                               "completed": selection.get('calibration_trials',18) if selection.get('calibration_reuse') else 0,
                               "reused": bool(selection.get('calibration_reuse')),
                               "reused_from": selection.get('calibration_reuse'),
@@ -845,6 +944,7 @@ class ContinuousController(OnlineController):
                           "expected_rate": cfg["device"]["sample_rate"] if cfg else None,
                           "eeg_endpoint": {k:cfg['device'][k] for k in ('host','port')} if cfg else None,
                           "gap_count": 0, "stale_seconds": 0., "saved_path": "", "physical_action": False,
+                          "stream_quality": dict(loss_events=0, corrupt_events=0, missing_samples=0, recovering=False),
                           "output_mode": output["mode"], "hand": idle_state(output["mode"]),
                           "output_config": copy.deepcopy(output),
                           "window_seconds": cfg["window"]["seconds"] if cfg else None,
@@ -929,9 +1029,12 @@ class ContinuousController(OnlineController):
             reason = '等待新脑电窗口信息 · 尚未投票'
         else:
             if self.fresh_source_cutoff is None:
-                # Anchor to received source indices after the rest interval. Queued
-                # or overlapping pre-return samples must not enter the next vote.
-                self.fresh_source_cutoff = window['received_end_index']+1
+                # Rest ends on the host clock. A delayed last packet must not
+                # move that boundary back onto pre-return samples.
+                clock = self.live_device_clock
+                stamp = clock.estimate(int(self.fresh_collection_after*1e9)) if clock else None
+                self.fresh_source_cutoff = (math.ceil((stamp-clock.origin_ms)*clock.fs/1000)
+                    if stamp is not None else window['received_end_index']+1)
             if window['source_start_index'] >= self.fresh_source_cutoff:
                 self.fresh_collection_after = None
                 return True
@@ -942,7 +1045,7 @@ class ContinuousController(OnlineController):
         return False
 
     def _prediction(self, p, elapsed, inference_ms, gate, predictions, commands, inference_details=None,
-                    prediction_window=None):
+                    prediction_window=None, input_age_seconds=0.):
         with self.condition:
             if self.session_purpose == 'calibration':
                 return
@@ -953,23 +1056,7 @@ class ContinuousController(OnlineController):
             if self.stop_event.is_set() or (self.state.get('calibration', {}).get('required')
                                            and not self.state['calibration'].get('ready')):
                 return
-            if self.simulation_motion is not None:
-                age = time.monotonic()-self.simulation_motion['started_mono']
-                hold = self.simulation_motion.get('hold_seconds', 0.)
-                if age >= 1.2+hold:
-                    self._finish_simulation()
-                    gate.last_command = elapsed
-                    gate.reset_candidate()
-                    self._begin_fresh_window(time.monotonic(), gate)
-                elif age >= .6+hold:
-                    self.state['hand']['phase'] = 'recovering'
-                elif age >= .6:
-                    self.state['hand']['phase'] = 'holding'
-            if self.motion_completed_at is not None:
-                gate.last_command = elapsed-(time.monotonic()-self.motion_completed_at)
-                gate.reset_candidate()
-                self._begin_fresh_window(self.motion_completed_at, gate)
-                self.motion_completed_at = None
+            self._advance_motion(elapsed, gate)
             prompted_ready = True
             if self.prompted is not None:
                 prompted_ready = self.prompted.before_prediction(prediction_window, self.prompted_origin_ms)
@@ -1000,7 +1087,8 @@ class ContinuousController(OnlineController):
             self.state.update(probabilities=np.asarray(p).tolist(), gate=dict(gate.state),
                               inference_ms=inference_ms, phase="decoding", status="running")
             self.state["n_predictions"] += 1
-            row = {"wall_seconds": elapsed, "probabilities": np.asarray(p).tolist(), "gate": gate.state}
+            row = {"wall_seconds": elapsed, "probabilities": np.asarray(p).tolist(), "gate": gate.state,
+                   "input_age_seconds": input_age_seconds, "delayed_input": input_age_seconds > 1.}
             if prediction_window is not None:
                 row['input_window'] = prediction_window
                 row['fresh_source_cutoff'] = self.fresh_source_cutoff
@@ -1008,41 +1096,81 @@ class ContinuousController(OnlineController):
                 row['router'] = inference_details
             predictions.write(json.dumps(row, ensure_ascii=False)+"\n")
             if event:
-                c = self.state["classes"][event["class_id"]]
-                real = self.output_config["mode"] == "inspire"
-                simulate_motion = not real and self.state['mode'] != 'four'
-                event.update(action=c["action"], action_name=c["action_name"], task=c.get("task_text", c["name"]),
-                             model_class_id=c['id'], model_class_name=c['name'], hand_action=c.get('hand_action'),
-                             driver="inspire" if real else "mock", physical_action=real,
-                             recovery='start' if real or simulate_motion else None,
-                             execution_status="executing" if real else "simulating" if simulate_motion else "simulated",
-                             sequence=self.state.get("command_count", 0)+1)
-                if self.prompted is not None:
-                    self.prompted.decision(event)
-                event['class_evidence'] = build_class_evidence(self.state['classes'], event, np.asarray(p).tolist())
-                event['instruction_evidence'] = instruction_evidence(event)
-                if real:
-                    if self.hand_output is None or not self.hand_output.submit(event):
-                        raise RuntimeError("机械手未就绪，未排队或重发本次指令。")
-                    self.state["hand"].update(busy=True, phase="executing")
-                    self.state["physical_action"] = True
-                    gate.state["reason"] = "已下发机械手动作 · 等待到位"
-                    self.state["gate"] = dict(gate.state)
-                elif simulate_motion:
-                    hold = self.output_config.get('action_profiles', {}).get(c.get('hand_action'), {}).get('hold_seconds', 0.)
-                    self.simulation_motion = dict(sequence=event['sequence'], started_mono=time.monotonic(), hold_seconds=hold)
-                    self.state['hand'].update(busy=True, phase='executing')
-                    gate.state['reason'] = '网页模拟：动作去程，随后返回起始姿态'
-                    self.state['gate'] = dict(gate.state)
-                self.state["commands"].append(event)
-                # Full history stays on disk; the browser retains the latest 100.
-                self.state["commands"] = self.state["commands"][-100:]
-                self.state["command_count"] = self.state.get("command_count", 0)+1
-                event["sequence"] = self.state["command_count"]
-                commands.write(json.dumps(event, ensure_ascii=False)+"\n")
-                commands.flush()
+                self._emit_decision(event, gate, commands)
             if self.prompted is not None:
                 self.state['prompted'] = self.prompted.snapshot()
+
+    def _advance_motion(self, elapsed, gate):
+        if self.simulation_motion is not None:
+            age = time.monotonic()-self.simulation_motion['started_mono']
+            hold = self.simulation_motion.get('hold_seconds', 0.)
+            if age >= 1.2+hold:
+                self._finish_simulation()
+                gate.last_command = elapsed
+                gate.reset_candidate()
+                self._begin_fresh_window(time.monotonic(), gate)
+            elif age >= .6+hold:
+                self.state['hand']['phase'] = 'recovering'
+            elif age >= .6:
+                self.state['hand']['phase'] = 'holding'
+        if self.motion_completed_at is not None:
+            gate.last_command = elapsed-(time.monotonic()-self.motion_completed_at)
+            gate.reset_candidate()
+            self._begin_fresh_window(self.motion_completed_at, gate)
+            self.motion_completed_at = None
+
+    def _vote_tick(self, elapsed, gate, commands):
+        """Deadlines advance even while every new slice is rejected or absent."""
+        with self.condition:
+            if (not isinstance(gate, VotingGate) or self.stop_event.is_set()
+                    or self.eeg_fault_active.is_set() or self.session_purpose == 'calibration'):
+                return
+            self._advance_motion(elapsed, gate)
+            if self.state['hand']['busy'] or (self.prompted is not None and self.prompted.phase != 'decoding'):
+                return
+            event = gate.tick(elapsed)
+            self.state['gate'] = dict(gate.state)
+            if event:
+                self._emit_decision(event, gate, commands)
+            elif gate.state.get('decision_reason') == 'deadline_no_votes' and self.prompted is not None:
+                self.prompted.no_output()
+            if self.prompted is not None:
+                self.state['prompted'] = self.prompted.snapshot()
+
+    def _emit_decision(self, event, gate, commands):
+        c = self.state["classes"][event["class_id"]]
+        real = self.output_config["mode"] == "inspire"
+        simulate_motion = not real and self.state['mode'] != 'four'
+        event.update(action=c["action"], action_name=c["action_name"], task=c.get("task_text", c["name"]),
+                     model_class_id=c['id'], model_class_name=c['name'], hand_action=c.get('hand_action'),
+                     driver="inspire" if real else "mock", physical_action=real,
+                     recovery='start' if real or simulate_motion else None,
+                     execution_status="executing" if real else "simulating" if simulate_motion else "simulated",
+                     sequence=self.state.get("command_count", 0)+1)
+        if self.prompted is not None:
+            self.prompted.decision(event)
+        event['class_evidence'] = build_class_evidence(self.state['classes'], event, event.get('mean_probabilities', self.state.get('probabilities', [])))
+        event['instruction_evidence'] = instruction_evidence(event)
+        if real:
+            if self.hand_output is None or not self.hand_output.submit(event):
+                raise RuntimeError("机械手未就绪，未排队或重发本次指令。")
+            self.state["hand"].update(busy=True, phase="executing")
+            self.state["physical_action"] = True
+            gate.state["reason"] = "已下发机械手动作 · 等待到位"
+            self.state["gate"] = dict(gate.state)
+        elif simulate_motion:
+            hold = self.output_config.get('action_profiles', {}).get(c.get('hand_action'), {}).get('hold_seconds', 0.)
+            self.simulation_motion = dict(sequence=event['sequence'], started_mono=time.monotonic(), hold_seconds=hold)
+            self.state['hand'].update(busy=True, phase='executing')
+            gate.state['reason'] = '网页模拟：动作去程，随后返回起始姿态'
+            self.state['gate'] = dict(gate.state)
+        self.state["commands"].append(event)
+        # Full history stays on disk; the browser retains the latest 100.
+        self.state["commands"] = self.state["commands"][-100:]
+        self.state["command_count"] = self.state.get("command_count", 0)+1
+        event["sequence"] = self.state["command_count"]
+        commands.write(json.dumps(event, ensure_ascii=False)+"\n")
+        commands.flush()
 
     def _finish_simulation(self, *, cancelled=False):
         with self.condition:
@@ -1151,6 +1279,7 @@ class ContinuousController(OnlineController):
                 report['stream_timing'] = self.state.get('stream_timing')
                 report['raw_samples_saved'] = self.state.get('raw_samples_saved')
                 report['stream_recovery'] = self.state.get('stream_recovery')
+                report['stream_quality'] = self.state.get('stream_quality')
                 report['calibration'] = self.state.get('calibration', {})
                 report['session_purpose'] = self.session_purpose
                 report['prompted'] = self.state.get('prompted', {'enabled': False})
@@ -1196,7 +1325,7 @@ class ContinuousController(OnlineController):
             from .six_class_online import load_checkpoint, SixClassDecoder
             if selection.get('right_hand_review'):
                 from .six_class_right_review import load_checkpoint, RightHandSixClassDecoder as SixClassDecoder
-            elif selection.get('requires_calibration'):
+            elif selection.get('requires_calibration') or selection.get('model_requires_calibration'):
                 from .six_class_improved import load_checkpoint, ImprovedSixClassDecoder as SixClassDecoder
             payload, model = load_checkpoint(selection['model'], selection['sha256'])
             decoder = SixClassDecoder(payload, model, cfg)
@@ -1248,7 +1377,7 @@ class ContinuousController(OnlineController):
                 else:
                     self._tcp_loop(cfg, decoder, gate, predictions, commands, session)
         finally:
-            if hasattr(decoder, 'save_calibration'):
+            if ONLINE_CALIBRATION_ENABLED and hasattr(decoder, 'save_calibration'):
                 decoder.save_calibration(session)
             with self.condition:
                 self.calibration_decoder = None
@@ -1262,12 +1391,17 @@ class ContinuousController(OnlineController):
             rates.popleft()
         processing_rate = sum(n for _, n in rates)/(rates[-1][0]-rates[0][0]+len(ix)/decoder.stream.fs) if rates else 0
         rate = processing_rate
+        input_age = 0.
         if received_timing is not None:
             timing = received_timing.snapshot(int(ix[-1])+1 if stored_samples is None else stored_samples)
             rate = timing['received_rate_hz']
             with self.condition:
                 self.state.update(stream_timing=timing, rate_hz=rate, processing_rate_hz=processing_rate)
-            received_timing.check(timing)
+            received_timing.check(timing, allow_packet_loss=True)
+            clock = timing['device_timeline']
+            if clock['estimated_device_now_ms'] is not None:
+                input_age = max(0., (clock['estimated_device_now_ms']-clock['device_origin_ms'])/1000
+                                -int(ix[-1])/decoder.stream.fs)
         elif elapsed > 3.5 and rates[-1][0]-rates[0][0] >= 1.5 and not .8*decoder.stream.fs <= rate <= 1.2*decoder.stream.fs:
             raise RuntimeError(f"实际接收速率约{rate:.1f} Hz，与模型要求{decoder.stream.fs:g} Hz不符；已停止，未补点或改采样率。")
         started = time.perf_counter()
@@ -1301,14 +1435,23 @@ class ContinuousController(OnlineController):
                 elif result is None and not self.state['n_predictions']:
                     self.state.update(phase='warming',
                         gate={'candidate':None, 'progress':0., 'reason':'校准完成 · 正在积累新的解码窗口'})
-            if result is None and self.state["phase"] == "warming":
+            if (result is None and self.state["phase"] == "warming"
+                    and getattr(gate, 'round_started', None) is None):
                 self.state["gate"] = {"candidate": None, "progress": 0., "reason": "正在积累模型窗口"}
             step = max(1, int(decoder.stream.fs/80))
             self.trace.extend([[int(i)/decoder.stream.fs, float(v)] for i, v in zip(ix[::step], raw[0, ::step])])
         if result is not None:
+            window = getattr(decoder, 'last_window', None)
+            quality = self.state.get('stream_quality', {})
+            if quality.get('recovering') and window is not None:
+                if window['source_start_index'] < quality.get('first_fresh_source_index', 0):
+                    self._vote_tick(elapsed, gate, commands)
+                    return
+                with self.condition:
+                    quality.update(recovering=False, last_clean_window=dict(window))
             self._prediction(result[1], elapsed, ms, gate, predictions, commands,
                              getattr(decoder, 'last_details', None),
-                             prediction_window=getattr(decoder, 'last_window', None))
+                             prediction_window=getattr(decoder, 'last_window', None), input_age_seconds=input_age)
 
     def _tcp_loop(self, cfg, decoder, gate, predictions, commands, session):
         from .tcp_simulator import TcpEEGSimulator
@@ -1376,31 +1519,38 @@ class ContinuousController(OnlineController):
         packets, faults, protocol_events = queue.Queue(4096), queue.Queue(), queue.Queue()
         markers, prompted = None, None
         received_origin_ms, latest_source = None, -1
+        received_packet_serial = 0
         initialization_end_source, decoder_started = None, False
         timing = ReceiveTiming(cfg['device']['sample_rate'])
+        self.live_device_clock = timing.device_clock
         recovery = StreamRecovery(len(cfg['device']['channels']),5)
         forward_gaps = ForwardGapRecovery()
         waiting_for_stream, waiting_reason, waiting_samples = False, '', 0
         def packet(p):
-            nonlocal received_origin_ms, latest_source
+            nonlocal received_origin_ms, latest_source, received_packet_serial
             if p.kind == "eeg":
                 if received_origin_ms is None:
                     received_origin_ms = p.device_ms
                 latest_source = round((p.device_ms-received_origin_ms)*cfg['device']['sample_rate']/1000)+p.counts.shape[1]-1
                 stamp = time.monotonic_ns()
-                timing.received(p.counts.shape[1], stamp)
+                received_packet_serial += 1
+                timing.received(p.counts.shape[1], stamp, p.device_ms)
                 try:
-                    packets.put_nowait((p, stamp))
+                    packets.put_nowait((p, stamp, received_packet_serial))
                 except queue.Full:
                     faults.put("输入队列溢出")
             elif markers is not None:
                 markers.observe(p)
         def status(kind, detail):
+            stamp = time.monotonic_ns()
             protocol_events.put(dict(kind=kind, detail=detail, wall_ns=time.time_ns(),
-                                     mono_ns=time.monotonic_ns()))
-            if kind in ("down", "stalled", "configuration_error", "payload_mismatch", "crc_error", "tail_error"):
-                self.eeg_fault_active.set()
-                faults.put(dict(kind=kind, detail=detail))
+                                     mono_ns=stamp))
+            if detail.get('source') == 'triggerbox_acp':
+                return
+            if kind in ("down", "configuration_error", "payload_mismatch", "crc_error", "tail_error"):
+                if kind in ('down', 'configuration_error'):
+                    self.eeg_fault_active.set()
+                faults.put(dict(kind=kind, detail=detail, mono_ns=stamp, after_packet_serial=received_packet_serial))
         adapter = NeusenAdapter(packet, status)
         protocol_log = (session/'protocol_events.jsonl').open('x', encoding='utf-8')
         def flush_protocol_events():
@@ -1412,28 +1562,42 @@ class ContinuousController(OnlineController):
             if waiting_for_stream:
                 return
             waiting_for_stream, waiting_reason, waiting_samples = True, reason, 0
-            self.eeg_fault_active.set()
-            gate.reset_candidate()
-            if prompted is not None:
-                with self.condition:
-                    prompted.suspend_stream(reason)
-                    self.state['prompted'] = prompted.snapshot()
             protocol_events.put(dict(kind='stream_wait', detail=dict(reason=reason),
                                      wall_ns=time.time_ns(), mono_ns=time.monotonic_ns()))
             with self.condition:
-                self.state.update(phase='waiting_stream', probabilities=[],
-                    gate=dict(candidate=None, progress=0., reason='脑电暂缓 · 保持连接并暂停动作'))
+                self.state.update(phase='waiting_stream', probabilities=[])
+                self.state['transport_wait'] = dict(waiting=True, reason=reason, loss_confirmed=False)
+
+        def note_loss(event):
+            with self.condition:
+                quality = self.state['stream_quality']
+                quality.update(loss_events=quality['loss_events']+1,
+                    missing_samples=quality['missing_samples']+max(0, round(event.get('device_gap_ms', 0)*cfg['device']['sample_rate']/1000)),
+                    recovering=True, reason=event['reason'],
+                    last_gap_ms=event.get('device_gap_ms', 0),
+                    first_fresh_source_index=event['first_new_source_index'])
+                self.state.update(stream_recovery=event, phase='recovering_stream', probabilities=[])
+                if isinstance(gate, VotingGate):
+                    if (self.session_purpose != 'calibration' and not self.state['hand']['busy']
+                            and self.fresh_collection_after is None
+                            and (prompted is None or prompted.phase == 'decoding')):
+                        gate.start_round(time.monotonic()-origin)
+                else:
+                    gate.reset_candidate()
+                if prompted is not None and prompted.current is not None:
+                    prompted.current['packet_loss_events'] = prompted.current.get('packet_loss_events', 0)+1
         def check_protocol_faults():
             flush_protocol_events()
             while not faults.empty():
                 fault = faults.get_nowait()
-                if isinstance(fault, dict) and fault['kind'] == 'crc_error':
+                if isinstance(fault, dict) and fault['kind'] in ('crc_error','tail_error','payload_mismatch'):
                     if hasattr(decoder,'recover_stream'):
-                        recovery.request(fault['detail'])
-                        wait_for_stream('CRC校验失败；当前试次中断，等待新的有效脑电')
+                        recovery.request(fault['detail'], after_mono_ns=fault['mono_ns'],
+                                         after_packet_serial=fault['after_packet_serial'])
                         with self.condition:
-                            self.state.update(phase='recovering_stream',
-                                gate=dict(candidate=None,progress=0.,reason='CRC异常 · 隔离数据并等待新窗口'))
+                            quality = self.state['stream_quality']
+                            quality.update(corrupt_events=quality['corrupt_events']+1,
+                                reason='校验异常；根据随后有效包的设备时间与包序号判断连续性')
                         continue
                     calibration = self.state.get('calibration', {})
                     complete = calibration.get('required') and calibration.get('ready')
@@ -1444,7 +1608,6 @@ class ContinuousController(OnlineController):
                     raise RuntimeError(prefix+phase+'收到的脑电数据包CRC校验失败，已停止。'
                                        '会话和通信异常记录已保存。'+suffix)
                 raise RuntimeError(str(fault))
-            recovery.expired()
         device = cfg["device"]
         # Same reference, units and preprocessing as the studio-created checkpoint;
         # input samples are adapter raw uV, never the display-filtered preview.
@@ -1478,7 +1641,7 @@ class ContinuousController(OnlineController):
             write_json(session/"device.json", adapter.describe())
             if self.prompted_settings['enabled']:
                 from .prompted_control import OnlineMarkers, PromptedControl
-                markers = OnlineMarkers(session, adapter, self.prompted_settings, packet, status)
+                markers = OnlineMarkers(session, adapter, self.prompted_settings, packet, status, timing.device_clock)
             if named_stream:
                 write_json(session/'input.json', {'source':'neusen_acp', 'device_channels':adapter.labels,
                     'model_input_order':device['channels'], 'reorder_indices':order, 'unit':adapter.unit,
@@ -1543,8 +1706,17 @@ class ContinuousController(OnlineController):
                         while not self.stop_event.is_set():
                             self._heartbeat()
                             check_protocol_faults()
+                            if prompted is not None:
+                                with self.condition:
+                                    calibration = self.state.get('calibration', {})
+                                    prompted.tick(not calibration.get('required') or calibration.get('ready', False))
+                                    self.state['prompted'] = prompted.snapshot()
+                                    if prompted.phase == 'complete':
+                                        self.stop_event.set()
+                                        break
+                            self._vote_tick(time.monotonic()-origin, gate, commands)
                             try:
-                                p, arrival = packets.get(timeout=.1)
+                                p, arrival, packet_serial = packets.get(timeout=.1)
                             except queue.Empty:
                                 snapshot = timing.snapshot(index)
                                 stale = snapshot['last_arrival_age_seconds']
@@ -1552,8 +1724,6 @@ class ContinuousController(OnlineController):
                                 with self.condition:self.state['stale_seconds'] = stale
                                 if stale > 1:
                                     wait_for_stream('脑电接收暂停超过1秒')
-                                if stale > 4:
-                                    raise RuntimeError('连续4秒没有有效脑电，连接未恢复，已停止并保存。')
                                 continue
                             check_protocol_faults()
                             fs = adapter.settings['fs']
@@ -1561,33 +1731,15 @@ class ContinuousController(OnlineController):
                                 source_origin_ms = p.device_ms
                                 self.prompted_origin_ms = source_origin_ms
                                 h.attrs['source_origin_device_ms'] = source_origin_ms
-                            if recovery.pending:
-                                if recovery.accepts(p,previous,fs):
-                                    discarded = pending_samples
-                                    persist_pending()
-                                    first_source = round((p.device_ms-source_origin_ms)*fs/1000)
-                                    if first_source < 0:raise RuntimeError('设备时钟回退，无法重建新窗口，已停止。')
-                                    gap = (p.device_ms-previous.device_ms-previous.counts.shape[1]*1000/fs) if previous is not None else 0.
-                                    decoder.recover_stream(first_source,'CRC校验失败；本次任务或窗口作废')
-                                    gate.reset_candidate();gate.latched=None;gate.neutral_since=None;rates.clear()
-                                    event = dict(**recovery.complete(),first_new_source_index=first_source,
-                                                 device_gap_ms=gap,discarded_pending_samples=discarded)
-                                    protocol_log.write(json.dumps(dict(kind='stream_recovery',detail=event,wall_ns=time.time_ns(),mono_ns=time.monotonic_ns()),ensure_ascii=False)+'\n');protocol_log.flush()
-                                    h.attrs['contains_discontinuities'] = True
-                                    with self.condition:
-                                        self.state.update(stream_recovery=event,phase='warming',probabilities=[],
-                                            gate=dict(candidate=None,progress=0.,reason='已隔离异常数据 · 重新积累完整窗口'))
-                                        if abs(gap)>.501:self.state['gap_count'] += 1
-                                        if hasattr(decoder,'snapshot_calibration'):
-                                            self.state['calibration']=decoder.snapshot_calibration()
-                                    previous=None
-                                    if not waiting_for_stream:
-                                        self.eeg_fault_active.clear()
-                                else:
-                                    pending.append((p,arrival));pending_samples += p.counts.shape[1]
-                                    previous=p
-                                    if pending_samples>=batch_samples:persist_pending()
-                                    continue
+                            if recovery.pending and recovery.accepts(p,previous,fs,arrival,packet_serial):
+                                event = recovery.complete()
+                                event.update(filters_reset=False,
+                                    sample_continuity_confirmed=previous is not None and packet_discontinuity(previous,p,fs) is None)
+                                protocol_events.put(dict(kind='crc_followup', detail=event,
+                                    wall_ns=time.time_ns(), mono_ns=time.monotonic_ns()))
+                                # Only verified sample discontinuity below resets
+                                # the decoder; a corrupt prefix may precede a
+                                # complete retransmitted copy of the same frame.
                             if previous is not None:
                                 gap_detail = packet_discontinuity(previous, p, fs)
                                 if gap_detail is not None:
@@ -1595,8 +1747,7 @@ class ContinuousController(OnlineController):
                                     with self.condition:self.state['gap_count'] += 1
                                     protocol_events.put(dict(kind='stream_gap',detail=gap_detail,
                                         wall_ns=time.time_ns(),mono_ns=time.monotonic_ns()))
-                                    reason = f"脑电缺口{gap_detail['device_gap_ms']:g}毫秒；当前窗口或试次作废"
-                                    wait_for_stream(reason)
+                                    reason = f"脑电缺口{gap_detail['device_gap_ms']:g}毫秒；仅剔除包含缺口的窗口"
                                     try:
                                         event = forward_gaps.accept(gap_detail)
                                         if not hasattr(decoder, 'recover_stream'):
@@ -1606,17 +1757,23 @@ class ContinuousController(OnlineController):
                                         pending.append((p,arrival));pending_samples += p.counts.shape[1]
                                         raise
                                     archived = pending_samples
-                                    persist_pending()  # Never mix either side of a gap into a model batch.
+                                    if archived:
+                                        before_raw,before_ix = persist_pending()
+                                        if initialization_end_source is None or decoder_started:
+                                            self._consume_chunk(before_raw[order] if named_stream else before_raw,before_ix,
+                                                origin,decoder,gate,predictions,commands,rates,
+                                                received_timing=timing,stored_samples=index)
+                                        else:
+                                            archived = 0  # Hardware self-test data is deliberately archive-only.
                                     first_source = round((p.device_ms-source_origin_ms)*fs/1000)
                                     decoder.recover_stream(first_source, reason)
-                                    gate.reset_candidate();gate.latched=None;gate.neutral_since=None;rates.clear()
+                                    rates.clear()
                                     event.update(first_new_source_index=first_source,
-                                                 archived_before_gap_without_inference=archived)
+                                                 processed_before_gap=archived)
                                     protocol_events.put(dict(kind='stream_recovery',detail=event,
                                         wall_ns=time.time_ns(),mono_ns=time.monotonic_ns()))
+                                    note_loss(event)
                                     with self.condition:
-                                        self.state.update(stream_recovery=event,phase='recovering_stream',probabilities=[],
-                                            gate=dict(candidate=None,progress=0.,reason='短暂缺包 · 暂停动作并重新积累完整窗口'))
                                         if hasattr(decoder,'snapshot_calibration'):
                                             self.state['calibration']=decoder.snapshot_calibration()
                             pending.append((p,arrival));pending_samples += p.counts.shape[1]
@@ -1624,41 +1781,16 @@ class ContinuousController(OnlineController):
                             if pending_samples < batch_samples:continue
                             raw,ix = persist_pending()
                             snapshot = timing.snapshot(index)
-                            if snapshot['backlog_seconds'] > timing.max_backlog:
-                                wait_for_stream('脑电接收积压；保留数据并等待实时位置')
                             if waiting_for_stream:
-                                # Archive every verified sample, but never send
-                                # transport backlog to the model or hand driver.
-                                waiting_samples += len(ix)
-                                with self.condition:
-                                    self.state.update(samples_received=index, wall_seconds=time.monotonic()-origin,
-                                        stream_timing=snapshot, stale_seconds=snapshot['last_arrival_age_seconds'] or 0.)
-                                    self.waveform_preview.append(raw[order] if named_stream else raw, ix)
-                                if snapshot['queued_samples'] > 0:
-                                    continue
-                                if recovery.pending:
-                                    continue
-                                if hasattr(decoder, 'recover_stream'):
-                                    decoder.recover_stream(int(ix[-1])+1, waiting_reason)
-                                else:
-                                    decoder.reset(int(ix[-1])+1)
-                                gate.reset_candidate();rates.clear()
-                                timing.restart_observation()
-                                if prompted is not None:
-                                    with self.condition:
-                                        prompted.resume_stream()
-                                        self.state['prompted'] = prompted.snapshot()
                                 protocol_events.put(dict(kind='stream_resumed', detail=dict(
-                                    reason=waiting_reason, first_fresh_source_index=int(ix[-1])+1,
-                                    archived_without_inference=waiting_samples, repaired_samples=0),
+                                    reason=waiting_reason, resumed_source_index=int(ix[0]),
+                                    filters_reset=False, archived_without_inference=0, repaired_samples=0),
                                     wall_ns=time.time_ns(), mono_ns=time.monotonic_ns()))
                                 waiting_for_stream = False
                                 if faults.empty():
                                     self.eeg_fault_active.clear()
                                 with self.condition:
-                                    self.state.update(phase='warming', probabilities=[],
-                                        gate=dict(candidate=None,progress=0.,reason='连接已恢复 · 重新积累完整窗口'))
-                                continue
+                                    self.state['transport_wait'] = dict(waiting=False, loss_confirmed=False)
                             if initialization_end_source is not None and not decoder_started:
                                 if int(ix[-1]) <= initialization_end_source:
                                     with self.condition:
@@ -1671,14 +1803,6 @@ class ContinuousController(OnlineController):
                                         ensure_ascii=False)+'\n')
                                     protocol_log.flush()
                                 decoder_started = True
-                            if prompted is not None:
-                                with self.condition:
-                                    calibration = self.state.get('calibration', {})
-                                    prompted.tick(not calibration.get('required') or calibration.get('ready', False))
-                                    self.state['prompted'] = prompted.snapshot()
-                                    if prompted.phase == 'complete':
-                                        self.stop_event.set()
-                                        break
                             now = time.monotonic()
                             if now-last_timing_log >= 1:
                                 timing_log.write(json.dumps(dict(wall_seconds=now-origin,**timing.snapshot(index)),ensure_ascii=False)+'\n')
@@ -1688,6 +1812,7 @@ class ContinuousController(OnlineController):
                         h.attrs['complete'] = True
                 finally:
                     persist_pending()  # Preserve the partial tail or offending packet without feeding it to the decoder.
+                    h.attrs['stream_quality'] = json.dumps(self.state['stream_quality'], ensure_ascii=False)
                     if prompted is not None:
                         # Prevent new motion, settle any in-flight operation before
                         # freezing trial results. No receiver/controller lock held.

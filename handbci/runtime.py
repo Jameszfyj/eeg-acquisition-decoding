@@ -27,13 +27,19 @@ class OnlineDecoder:
     def reset(self, first_index=0):
         self.stream.reset(first_index)
         self.history = np.empty((self.payload["architecture"]["n_channels"], 0), np.float32)
+        self.indices = np.empty(0, np.int64)
+        self.last_window = None
         self.last_prediction = -float("inf")
+
+    def recover_stream(self, first_source_index, reason):
+        self.reset(first_source_index)
 
     def process(self, raw, indices):
         processed, retained = self.stream.process(raw, indices)
         if not len(retained):
             return None
         self.history = np.concatenate([self.history, processed], axis=1)[:, -self.n_time:]
+        self.indices = np.concatenate([self.indices, retained])[-self.n_time:]
         now = float(indices[-1]) / self.stream.fs
         interval = self.payload["config"].get("decision", {}).get("update_seconds", 0.1)
         if self.history.shape[1] < self.n_time or now - self.last_prediction < interval - 1e-9:
@@ -41,6 +47,7 @@ class OnlineDecoder:
         inputs = transform_windows(self.payload, self.history[None])
         p = predict_inputs(self.model, inputs, self.device)[0]
         self.last_prediction = now
+        self.last_window = self.stream.window_bounds(self.indices, indices[-1])
         return now, p
 
 

@@ -40,15 +40,16 @@ class RetrainedSixClassModel:
             model.eval();model.requires_grad_(False);self.models[key]=model
         self.alignment=None;self.state=None;self.calibration=None
 
-    def features(self, windows, expert=False):
+    def features(self, windows, expert=False, *, allow_uncalibrated=False):
         x=np.asarray(windows,np.float32)
         if x.ndim!=4 or x.shape[1:]!=(3,30,500) or not len(x) or not np.isfinite(x).all():
             raise ValueError('需要有限的[任务数,3,30,500]原预处理和陷波窗口。')
         bands=[[8.,13.],[13.,30.]] if expert else [[4.,16.],[16.,40.]]
         values=band_windows(x.reshape(-1,30,500),bands)
         if expert:
-            if self.alignment is None:raise RuntimeError('尚未完成新会话20轮校准。')
-            values=np.einsum('cd,nbdt->nbct',self.alignment,values,optimize=True).astype(np.float32)
+            if self.alignment is None and not allow_uncalibrated:raise RuntimeError('尚未完成新会话20轮校准。')
+            if self.alignment is not None:
+                values=np.einsum('cd,nbdt->nbct',self.alignment,values,optimize=True).astype(np.float32)
         model=self.models['expert' if expert else 'baseline'];features=[];logits=[]
         with torch.inference_mode():
             for start in range(0,len(values),128):
@@ -57,10 +58,10 @@ class RetrainedSixClassModel:
                 logits.append(model.classifier(f).cpu().numpy());features.append(f.cpu().numpy())
         return np.concatenate(features).reshape(-1,3,features[0].shape[-1]),np.concatenate(logits).reshape(-1,3,6)
 
-    def predict(self, windows):
-        if self.calibration is None:raise RuntimeError('新模型必须先完成独立的新会话20轮校准。')
+    def predict(self, windows, *, allow_uncalibrated=False):
+        if self.calibration is None and not allow_uncalibrated:raise RuntimeError('新模型必须先完成独立的新会话20轮校准。')
         _,z=self.features(windows);p=softmax(z,axis=-1).mean(1)
-        f,z=self.features(windows,expert=True);pair=residual_probabilities(f,z,self.state)
+        f,z=self.features(windows,expert=True,allow_uncalibrated=allow_uncalibrated);pair=residual_probabilities(f,z,self.state)
         gate=p.argmax(1)>=4;out=p.copy();out[gate]=0;out[gate,4:6]=pair[gate]
         return dict(probabilities=out,pair_probabilities=pair,
                     baseline_probabilities=p,feet_tongue_gate=gate)
