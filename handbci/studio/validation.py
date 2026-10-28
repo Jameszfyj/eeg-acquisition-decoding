@@ -89,10 +89,13 @@ class TrialValidation:
             anchor='prepare' if self.decoder.prepare_aligned else 'cue_full_raw_support',
             window_end='before_task_end_no_rest_samples', voting='all_complete_windows_one_vote_each',
             tie_break='mean_probability_then_unresolved', feedback_phase='rest',
+            loss_policy='continue_recording_skip_only_windows_crossing_gap_including_fir_history',
             task_labels_used_for_prediction=False, path='onnx_validation/summary.json')
         self.lock = threading.RLock()
         self.queue = queue.Queue(128)
         self.batches, self.markers, self.completed = deque(), {}, set()
+        self.source_origin_ms = None
+        self.preview_ends = {}
         self.results = []
         self.state = dict(enabled=True, status='waiting', classes=self.classes, latest=None,
                           model_name=entry['name'], model_id=entry['model_id'],
@@ -157,13 +160,20 @@ class TrialValidation:
                     try:
                         kind, value = self.queue.get(timeout=.05)
                     except queue.Empty:
+                        self._ready(predictions, trials)
                         continue
                     if self.snapshot()['error']:
                         continue
                     if kind == 'data':
+                        if self.source_origin_ms is None:
+                            self.source_origin_ms = float(value[1][0])-value[2]*1000/self.fs
                         self.batches.append(value)
                         end = value[2]+value[0].shape[1]
-                        while self.batches and self.batches[0][2]+self.batches[0][0].shape[1] < end-self.retain_samples:
+                        pending_starts = [m['prepare']['device_time_ms']-self.warmup*1000/self.fs
+                            for m in self.markers.values() if m.get('prepare',{}).get('device_time_ms') is not None]
+                        keep_from = min(pending_starts,default=float('inf'))
+                        while (self.batches and self.batches[0][2]+self.batches[0][0].shape[1] < end-self.retain_samples
+                               and self.batches[0][1][-1] < keep_from):
                             self.batches.popleft()
                     elif kind == 'event' and value.get('kind') in ('prepare','cue','task_end'):
                         self.markers.setdefault(value['trial_id'], {})[value['kind']] = value
@@ -189,76 +199,146 @@ class TrialValidation:
                 if final:
                     self._result(dict(trial_id=trial_id, status='skipped', reason='试次未完成或缺少标记', correct=None), trials)
                 continue
-            if not self.batches or self.batches[-1][1][-1]+1000/self.fs < marks['task_end']['device_time_ms']:
-                if final:
-                    self._result(dict(trial_id=trial_id, status='skipped', reason='任务结束边界尚无完整数据', correct=None), trials)
-                continue
+            boundary_received = bool(self.batches and
+                self.batches[-1][1][-1]+1000/self.fs >= marks['task_end']['device_time_ms'])
+            if not boundary_received:
+                issued = marks['task_end'].get('mono_time_ns')
+                # A host timeout cannot prove missing device samples. Preview
+                # the valid prefix, but keep this trial open for delayed data.
+                expired = issued is not None and time.perf_counter_ns()-issued >= 500_000_000
+                if not final:
+                    end = float(self.batches[-1][1][-1]) if self.batches else -float('inf')
+                    last = self.preview_ends.get(trial_id)
+                    if not expired or not self.queue.empty() or (last is not None and (end == last or end-last < 500)):
+                        continue
+                    row = dict(trial_id=trial_id, windows=0)
+                    if self.batches:
+                        try:
+                            row = self.evaluate(marks, io.StringIO(), provisional=True)
+                        except (ValueError, RuntimeError):
+                            pass
+                    row.update(status='waiting_data', reason='等待延迟数据补到', provisional=True,
+                               correct=None, end_boundary_received=False)
+                    self.preview_ends[trial_id] = end
+                    with self.lock:
+                        self.state.update(status='waiting_data', latest=row)
+                    continue
+                if not self.batches:
+                    self._result(dict(trial_id=trial_id, status='transmission_error', reason='传输异常',
+                        detail='任务已结束但未收到脑电数据；后续试次继续验证。', windows=0, correct=None), trials)
+                    continue
             with self.lock:
                 self.state.update(status='evaluating', latest=dict(trial_id=trial_id, status='evaluating', windows=0))
             try:
                 row = self.evaluate(marks, predictions)
+                row['end_boundary_received'] = boundary_received
             except (ValueError, RuntimeError) as exc:
                 row = dict(trial_id=trial_id, status='skipped', reason=str(exc), correct=None)
             self._result(row, trials)
             with self.lock:
                 self.state['status'] = 'failed' if self.state['error'] else 'waiting'
 
-    def evaluate(self, marks, predictions):
+    def evaluate(self, marks, predictions, provisional=False):
         raw = np.concatenate([b[0] for b in self.batches], axis=1)[self.order]
         stamps = np.concatenate([b[1] for b in self.batches])
-        ix = np.concatenate([np.arange(b[2], b[2]+b[0].shape[1]) for b in self.batches])
+        storage_ix = np.concatenate([np.arange(b[2], b[2]+b[0].shape[1]) for b in self.batches])
+        origin = self.source_origin_ms
+        if origin is None:
+            origin = float(stamps[0])-int(storage_ix[0])*1000/self.fs
+        # Keep the device timeline, including holes; never close gaps by using
+        # contiguous disk offsets as model sample indices.
+        ix = np.rint((stamps-origin)*self.fs/1000).astype(np.int64)
         if np.any(np.diff(stamps) <= 0):
             raise ValueError('设备时钟倒退，无法验证')
         positions = {k:int(np.searchsorted(stamps, marks[k]['device_time_ms'])) for k in marks}
         prepare, cue, end = (positions[k] for k in ('prepare','cue','task_end'))
-        if not 0 <= prepare < cue < end <= len(ix):
+        if not (marks['prepare']['device_time_ms'] < marks['cue']['device_time_ms'] < marks['task_end']['device_time_ms']
+                and 0 <= prepare <= cue <= end <= len(ix)):
             raise ValueError('试次边界无效或数据不足')
         factor = getattr(self.decoder.stream, 'factor', 1)
-        anchor = round(int(ix[prepare])/factor)*factor if self.decoder.prepare_aligned else int(ix[cue])+self.history
+        prepare_source = round((marks['prepare']['device_time_ms']-origin)*self.fs/1000)
+        cue_source = round((marks['cue']['device_time_ms']-origin)*self.fs/1000)
+        end_source = int(np.ceil((marks['task_end']['device_time_ms']-origin)*self.fs/1000))
+        anchor = round(prepare_source/factor)*factor if self.decoder.prepare_aligned else cue_source+self.history
         anchor = ((anchor+factor-1)//factor)*factor
         start = max(0, int(np.searchsorted(ix, anchor-self.warmup-factor)))
-        # The entire prepare/task interval and required FIR support must be continuous.
-        check_start = min(start, prepare)
-        if (np.any(np.diff(ix[check_start:end]) != 1)
-                or np.any(np.abs(np.diff(stamps[check_start:end])-1000/self.fs) > max(.501, .05*1000/self.fs))):
-            raise ValueError('试次或滤波历史跨Gap，未拼接、未补点、未投票')
-        for k in ('prepare','cue','task_end'):
-            j = positions[k]
-            if j and j < len(stamps) and stamps[j]-stamps[j-1] > 1000/self.fs+.501:
-                raise ValueError('标记位于设备时间缺口')
-        if anchor-self.history < ix[start]:
-            raise ValueError('滤波历史不足')
         decoder = self.decoder
-        decoder.stream.reset(int(ix[start]))
-        values, retained = decoder.stream.process(raw[:,start:end], ix[start:end])
+        breaks = set((np.flatnonzero((np.diff(ix) != 1) |
+            (np.abs(np.diff(stamps)-1000/self.fs) > max(.501, .05*1000/self.fs)))+1).tolist())
+        for batch in self.batches:
+            if len(batch) > 3:
+                breaks.update(int(np.searchsorted(storage_ix, b)) for b in batch[3])
+        edges = [start]+sorted(b for b in breaks if start < b < end)+[end]
+        chunks, kept, segment_ids = [], [], []
+        for segment, (a, b) in enumerate(zip(edges, edges[1:])):
+            if b <= a:
+                continue
+            decoder.stream.reset(int(ix[a]))
+            y, indices = decoder.stream.process(raw[:,a:b], ix[a:b])
+            usable = indices >= ix[a]+self.history
+            chunks.append(y[:,usable]);kept.append(indices[usable])
+            segment_ids.extend([segment]*int(usable.sum()))
+        values = np.concatenate(chunks, axis=1) if chunks else np.empty((len(self.order), 0))
+        retained = np.concatenate(kept) if kept else np.empty(0, dtype=np.int64)
+        segment_ids = np.asarray(segment_ids)
         step = round(.5*self.fs)
-        ps, bounds = [], []
+        ps, bounds, skipped, pending = [], [], 0, 0
         trial_id = int(marks['cue']['trial_id'])
         target = self.task_map[int(marks['cue']['label'])]
         verified = all(marks[k].get('echo_verified', False) for k in ('prepare','cue','task_end'))
-        for source in range(anchor, int(ix[end-1])+1, step):
-            a = int(np.searchsorted(retained, source))
-            if a+decoder.n_time > len(retained):
+        marker_gap = any(0 < positions[k] < len(stamps)
+            and stamps[positions[k]-1] < marks[k]['device_time_ms'] < stamps[positions[k]]
+            and positions[k] in breaks for k in ('prepare','cue','task_end'))
+        verified = verified and not marker_gap
+        gap_count = sum(1 for b in breaks if 0 < b < len(stamps)
+                        and stamps[b-1] < marks['task_end']['device_time_ms']
+                        and stamps[b] > min(marks['prepare']['device_time_ms'], (anchor-self.history)*1000/self.fs+origin))
+        if not provisional and end_source > ix[-1]+1:
+            gap_count += 1
+        # Enumerate the intended trial timeline, including a missing tail or an
+        # entirely lost trial. Storage offsets must not shorten the vote grid.
+        for source in range(anchor, end_source, step):
+            last = source+(decoder.n_time-1)*factor
+            if last >= end_source:
                 break
-            if retained[a] != source:
+            if provisional and last > ix[-1]:
+                pending += 1
+                continue
+            a = int(np.searchsorted(retained, source))
+            if (a+decoder.n_time > len(retained) or retained[a] != source
+                    or retained[a+decoder.n_time-1] != last
+                    or segment_ids[a] != segment_ids[a+decoder.n_time-1]):
+                skipped += 1
+                predictions.write(json.dumps(dict(trial_id=trial_id, status='skipped', reason='Gap_or_filter_history',
+                    model_start_index=int(source), source_start_index=int(source-self.history),
+                    source_end_index=int(last)), ensure_ascii=False)+'\n')
                 continue
             p = decoder.predict_window(values[decoder.order,a:a+decoder.n_time])
             window = decoder.stream.window_bounds(retained[a:a+decoder.n_time], int(ix[end-1]))
             window['model_start_index'] = int(source)
             ps.append(p);bounds.append(window)
             scores = vote_scores(ps)
-            row = dict(trial_id=trial_id, status='evaluating', classes=self.classes,
-                       target_class=target, label_verified=verified, **scores)
+            row = dict(trial_id=trial_id, status='waiting_data' if provisional else 'evaluating', classes=self.classes,
+                       target_class=target, label_verified=verified, skipped_windows=skipped, gap_count=gap_count,
+                       provisional=provisional, pending_windows=pending, **scores)
             with self.lock:
                 self.state['latest'] = row
             predictions.write(json.dumps(dict(trial_id=trial_id, window_number=len(ps),
                 input_window=window, probabilities=p.tolist(), **scores), ensure_ascii=False, allow_nan=False)+'\n')
         predictions.flush()
         if not ps:
+            if provisional:
+                return dict(trial_id=trial_id, status='waiting_data', windows=0,
+                    skipped_windows=skipped, pending_windows=pending, gap_count=gap_count, correct=None)
+            if skipped:
+                return dict(trial_id=trial_id, status='transmission_error', reason='传输异常',
+                    detail='所有候选slice均受Gap或其滤波历史影响，无有效票；后续试次继续验证。',
+                    windows=0, skipped_windows=skipped, gap_count=gap_count, correct=None)
             raise ValueError('完整模型窗口不足，未投票')
         scores = vote_scores(ps)
         return dict(trial_id=trial_id, status='completed', classes=self.classes,
                     target_class=target, label_verified=verified,
+                    skipped_windows=skipped, pending_windows=pending, gap_count=gap_count, marker_in_gap=marker_gap,
                     correct=(scores['predicted_class'] == target) if verified else None,
                     prepare_index=int(ix[prepare]), cue_index=int(ix[cue]), end_index=int(ix[end-1])+1,
                     first_window=bounds[0], last_window=bounds[-1], **scores)

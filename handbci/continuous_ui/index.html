@@ -12,7 +12,8 @@
     <a class="brand" href="/" aria-label="在线解码首页"><span class="brand-symbol">◈</span><span>脑电解码<span class="brand-sub">CONTINUOUS / LOCAL</span></span></a>
     <div class="workspace-switch" role="group" aria-label="解码入口"><button id="sixWorkspace" class="selected" aria-pressed="true">通用解码</button><button id="fourWorkspace" aria-pressed="false">四分类测试</button></div>
     <div class="side-heading"><span>会话配置</span><span class="version">V0.1</span></div>
-    <a class="button secondary" href="http://127.0.0.1:57500/" target="_blank" rel="noopener">打开模型校准工具 · MI Studio v2</a>
+    <a id="modelCalibrationTool" class="button secondary" href="http://127.0.0.1:57500/" target="_blank" rel="noopener" hidden>打开模型校准工具 · MI Studio v2</a>
+    <p id="onlineCalibrationNotice" class="field-note" role="status">软件调试期间暂时禁用在线脑电校准，模型可直接测试。</p>
     <label class="field">数据来源<select id="mode"><option value="acp">导入模型 · ACP直连</option><option value="simulated">导入模型 · 模拟脑电</option><option value="demo">界面演示（不推理）</option><option value="six">原研究模型 · 六分类</option><option value="four" hidden>真实脑电 · ACP直连</option></select></label>
     <p id="sourceHint" class="field-note">六分类 · 选择基础模型或需要校准的改进模型。</p>
     <label class="field">被试编号<select id="participant"></select></label>
@@ -24,7 +25,7 @@
       <button id="importModel" class="button secondary">导入并检查</button>
       <p id="importStatus" class="field-note" role="status">支持ONNX模型包ZIP及本项目IFNet格式PT，最多32MB。导入不会连接设备。</p>
     </details>
-    <details class="side-details"><summary>导入外部校准数据</summary>
+    <details id="calibrationDataImport" class="side-details" hidden><summary>导入外部校准数据</summary>
       <p class="field-note">先选对应被试和模型，再选择本项目采集平台保存的单个完整会话文件夹或ZIP。保留session.json和data.h5；支持20轮、想象4秒的记录。准备时长可变，按实际想象起止标记提取脑电。</p>
       <label class="field">会话文件夹<input id="calibrationImportFolder" type="file" webkitdirectory directory multiple></label>
       <label class="field">或会话ZIP<input id="calibrationImportZip" type="file" accept=".zip"></label>
@@ -38,11 +39,13 @@
       <p id="eegDiscoveryResult" class="field-note" role="status">正在自动搜索同网段脑电设备…</p>
       <button id="checkEEG" class="button secondary" disabled>测试脑电连接</button>
       <p id="eegCheckResult" class="field-note" role="status">选择设备后，可在此直接测试连接。</p>
+      <button id="disconnectDevices" class="button secondary">断开连接</button>
+      <p id="deviceConnectionStatus" class="field-note" role="status">断开时停止采集并保存记录，释放设备连接。</p>
       <p id="deviceHint" class="field-note">自动搜索并连接设备，无需填写地址，也无需先在采集平台连接。其他程序若正在占用设备，请先断开该连接。</p>
     </div>
     <div id="modelMeta" class="model-meta">正在读取模型列表…</div>
     <label id="outputField" class="field">动作输出<select id="outputMode"><option value="simulation">仅网页模拟 · 不连接机械手</option><option value="inspire">真实机械手 · Inspire</option></select></label>
-    <p id="outputHint" class="field-note" hidden>开始真实解码时先伸直五指，保持已保存的拇指朝向；确认归位后再接收解码动作。改进模型使用上次校准或重新校准，每次动作完成后返回起始位置。</p>
+    <p id="outputHint" class="field-note" hidden>开始真实解码时先伸直五指，保持已保存的拇指朝向；确认归位后再接收解码动作。每次动作完成后返回起始位置。</p>
     <details id="handSettings" class="side-details" open><summary>机械手连接</summary>
       <label class="field">机械手串口<select id="handPort"><option value="">正在搜索串口…</option></select></label>
       <div class="two-fields hand-buttons"><button id="refreshPorts" class="button secondary">重新搜索</button><button id="checkHand" class="button secondary">测试连接</button></div>
@@ -56,7 +59,8 @@
         <div class="two-fields"><label class="field">回位后休息 / 秒<input id="promptRest" type="number" value="2" min="0" max="20" step="0.5"></label><label class="field">预提示准备 / 秒<input id="promptPrepare" type="number" value="2" min="0.5" max="20" step="0.5"></label></div>
         <p id="promptTimingHint" class="field-note">回位后间隔共4秒：休息2秒＋预提示2秒。两段包含在总间隔内；总间隔可在“判决参数”中修改。</p>
         <div class="two-fields"><label class="field">轮数<input id="promptLoops" type="number" value="4" min="1" max="100" step="1"></label><label class="field">随机种子<input id="promptSeed" type="number" min="0" max="2147483647" step="1" placeholder="自动生成"></label></div>
-        <label class="field">标记方式<select id="promptMarking"><option value="serial">USB TriggerBox · 回传核验</option><option value="software">软件标记 · 接收时钟估计</option></select></label>
+        <label class="field">标记方式<select id="promptMarking"><option value="serial">USB TriggerBox · 回传核验</option><option value="software">软件标记 · 指令发出时记录</option></select></label>
+        <p id="promptSoftwareHint" class="field-note" hidden>无需TriggerBox、串口或回传自检。发出任务指令时立即记录主机时间，按脑电接收位置估计样点；记录中注明软件标记。</p>
         <div id="promptHardware">
           <label class="field">TriggerBox串口<select id="promptPort"><option value="">正在等待自动搜索…</option></select></label>
           <label class="field trigger-wireless-choice"><span><input id="promptWireless" type="checkbox" checked> 通过Wi-Fi接收事件并同步脑电</span></label>
@@ -66,7 +70,7 @@
           <p id="triggerCheckResult" class="field-note" role="status">尚未检验；设备身份、时钟同步和事件回传分别核验。</p>
           <p class="field-note">USB负责发送标记，Wi-Fi接收事件；只找到一台时自动选中，多台时从列表选择。检验时临时连接所选脑电设备，不驱动机械手，检验后释放连接。采用有线回传时可关闭Wi-Fi选项。</p>
         </div>
-        <p class="field-note">每轮每类一次，随机提示；支持2至6类。沿用下方投票参数，动作回位及间隔结束后进入下一条，不增加固定想象时长。模型校准单独进行。真实执行需选择真实机械手。</p>
+        <p class="field-note">每轮每类一次，随机提示；支持2至6类。沿用下方投票参数，动作回位及间隔结束后进入下一条，不增加固定想象时长。在线脑电校准暂时禁用。真实执行需选择真实机械手。</p>
       </div>
     </details>
     <details class="side-details"><summary>判决参数</summary>
@@ -84,7 +88,7 @@
     </details>
     <details id="mappingSettings" class="side-details"><summary>真实类别 → 机械手动作</summary><div id="mapping"></div><p class="field-note">显示所选模型原始ID、名称和任务。下拉框只调整动作映射，不修改训练标签。请按实际类别确认动作映射。</p></details>
     <div class="session-controls"><button id="check" class="button secondary">检查模型配置</button></div>
-    <div class="side-footer"><span class="local-dot"></span> 本机运行 · 默认模拟输出<br><span>改进模型可复用已完成的校准</span></div>
+    <div class="side-footer"><span class="local-dot"></span> 本机运行 · 默认模拟输出<br><span>保留模型参数，在线校准暂时禁用</span></div>
   </aside>
   <main>
     <header class="page-header"><div><p class="eyebrow">NEURAL CONTROL WORKSPACE</p><h1 id="pageTitle">持续解码工作台</h1><p id="pageSubtitle" class="subtitle">观察每一次预测，让稳定的意图成为动作。</p></div><div class="header-right"><span id="statusBadge" class="status-badge">● 待机</span><button id="fullscreen" class="icon-button" title="切换全屏" aria-label="切换全屏">⛶</button></div></header>
@@ -152,7 +156,8 @@
       </aside>
     </section>
     <section id="decodeWavePanel" class="panel decode-wave-panel" hidden aria-label="实时脑电波形"><div id="liveWaveHome"></div></section>
-    <section class="metrics" aria-label="实时接收与推理指标"><div><span>运行时间</span><strong id="wallTime">00:00</strong><small>本机时钟</small></div><div><span>实际接收速率</span><strong id="inputRate">—</strong><small id="rateNote">等待脑电输入</small></div><div><span>预测次数</span><strong id="predictionCount">0</strong><small id="inferenceNote">尚未预测</small></div><div><span>数据缺口</span><strong id="gapCount">—</strong><small id="gapNote">真实数据模式监测</small></div></section>
+    <section class="metrics" aria-label="实时接收与推理指标"><div><span>运行时间</span><strong id="wallTime">00:00</strong><small>本机时钟</small></div><div><span>网络接收速度</span><strong id="inputRate">—</strong><small id="rateNote">等待脑电输入</small></div><div><span>预测次数</span><strong id="predictionCount">0</strong><small id="inferenceNote">尚未预测</small></div><div><span>数据缺口</span><strong id="gapCount">—</strong><small id="gapNote">真实数据模式监测</small></div></section>
+    <p id="streamLossStatus" role="status" hidden style="color:#ffd185; padding:10px 16px; border:1px solid #956b2d; border-radius:8px"></p>
     <details class="panel monitor-panel" id="monitor"><summary><span>信号与类别概率</span><span class="muted small">展开监测</span></summary><div class="monitor-grid"><div><h3>各类预测概率</h3><div id="monitorProbabilityHome"><div id="probabilities"></div></div></div><div id="monitorWaveHome"><div id="waveformContent"><div class="wave-heading"><h3 id="waveTitle">实时脑电波形</h3><span id="wavePhase" class="wave-phase" role="status">等待开始</span><label class="wave-scale">量程<select id="waveScale" aria-label="三通道统一显示量程"><option value="50" selected>±50 μV</option><option value="100">±100 μV</option><option value="200">±200 μV</option><option value="500">±500 μV</option></select></label></div><canvas id="wave" aria-label="C3、Cz、C4三通道最近五秒脑电，共用时间轴和固定量程"></canvas><p id="waveHint" class="muted small">C3 · Cz · C4 · 最近5秒 · 连接后显示真实脑电。</p></div></div></div></details>
     <section class="panel log-panel"><div class="panel-heading"><div><span class="section-index">04</span><h2 id="logTitle">动作记录</h2></div><span id="logNote" class="muted small">实际动作以机械手回读为准</span></div><div class="table-wrap"><table><thead><tr id="logHead"><th>序号</th><th>时间</th><th>指令动作</th><th>实际动作</th><th>结果</th></tr></thead><tbody id="logRows"><tr><td colspan="5" class="empty">暂无动作记录</td></tr></tbody></table></div></section>
     <div id="saved" class="saved" hidden><span>记录已保存</span><input id="savedPath" readonly aria-label="记录保存路径"><button id="copyPath" class="button secondary">复制路径</button></div>

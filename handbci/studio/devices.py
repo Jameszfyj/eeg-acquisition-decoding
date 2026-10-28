@@ -161,7 +161,7 @@ class NeusenAdapter(DeviceAdapter):
         return acp.discover(timeout=3.0, repeat=.5, extra_hosts=known_hosts)
 
     def _status(self, kind, detail):
-        if kind in ("down", "stalled"):
+        if kind == "down":
             self.running = False
         self.on_status(kind, detail)
 

@@ -67,14 +67,18 @@ class StreamIntegrityTests(unittest.TestCase):
             self.assertIn('crc_error', [k for k, _ in events])
             self.assertNotIn('duplicate_prefix', [k for k, _ in events])
 
-    def test_three_real_crc_faults_still_stop(self):
+    def test_repeated_crc_faults_wait_for_verified_parser_boundary(self):
         _, events = self.parse([frame()[:372]+frame(2)])
         detail = next(d for k, d in events if k == 'crc_error')
         recovery = StreamRecovery(32, 5)
-        recovery.request(detail, now=0)
-        recovery.request(detail, now=1)
-        with self.assertRaisesRegex(RuntimeError, '3次'):
-            recovery.request(detail, now=2)
+        for i in range(100):
+            recovery.request(detail, now=i/10, after_mono_ns=1000+i)
+        packet = type('Packet', (), {'device_ms':5000})()
+        self.assertFalse(recovery.accepts(packet, None, 1000, 1099))
+        self.assertTrue(recovery.accepts(packet, None, 1000, 1100))
+        event = recovery.complete()
+        self.assertEqual(len(event['corrupt_frames']),100)
+        self.assertFalse(event['decision_votes_cleared'])
 
 
 if __name__ == '__main__':

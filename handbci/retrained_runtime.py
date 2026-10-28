@@ -120,6 +120,7 @@ class RetrainedStreamDecoder:
                 raise ValueError('配套20轮校准参数校验失败。')
             self.predictor.restore_calibration(calibration_path)
         self.cfg=cfg;self.stream=StreamPreprocessor(cfg)
+        self.calibration_disabled=bool(cfg.get('session_metadata',{}).get('online_calibration_disabled'))
         self.notch=signal.iirnotch(50.,30.,fs=250.)
         self.recover_stream(0,'initial')
 
@@ -129,6 +130,8 @@ class RetrainedStreamDecoder:
         self.last_prediction=-float('inf');self.last_window=self.last_details=None
 
     def fit_calibration(self,raw,labels,starts,source_summary=None):
+        if self.calibration_disabled:
+            raise ValueError('在线调试期间不允许拟合校准参数。')
         labels=np.asarray(labels,dtype=np.int64)
         windows=task_windows(raw,starts,self.cfg)
         summary=source_summary or {}
@@ -150,12 +153,14 @@ class RetrainedStreamDecoder:
         if len(self.indices)<700 or now-self.last_prediction<.1-1e-9:return None
         windows=np.stack([self.history[:,:500],self.history[:,100:600],self.history[:,200:700]])
         windows=signal.filtfilt(*self.notch,windows,axis=-1).astype(np.float32)
-        output=self.predictor.predict(windows[None])
+        output=self.predictor.predict(windows[None], allow_uncalibrated=self.calibration_disabled)
         self.last_window=self.stream.window_bounds(self.indices,indices[-1]);self.last_prediction=now
         self.last_details=dict(baseline_probabilities=output['baseline_probabilities'][0].tolist(),
             feet_tongue_probabilities=output['pair_probabilities'][0].tolist(),
             pair_routed=bool(output['feet_tongue_gate'][0]),
-            calibration_method=CALIBRATION_METHOD,selected_head=self.predictor.calibration['method'])
+            online_calibration_disabled=self.calibration_disabled,
+            calibration_method=CALIBRATION_METHOD if self.predictor.calibration else None,
+            selected_head=self.predictor.calibration['method'] if self.predictor.calibration else 'uncalibrated_identity_alignment')
         return now,output['probabilities'][0]
 
     def save_model_calibration(self,path):

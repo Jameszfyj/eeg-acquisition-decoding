@@ -2,6 +2,7 @@
 from collections import deque
 import threading
 import time
+from .device_timeline import DeviceClockEstimate
 
 
 class ReceiveTiming:
@@ -12,8 +13,11 @@ class ReceiveTiming:
         self.arrivals = deque()
         self.total = 0
         self.bad_since = None
+        self.device_clock = DeviceClockEstimate(fs)
 
-    def received(self, count, stamp_ns):
+    def received(self, count, stamp_ns, device_ms=None):
+        if device_ms is not None:
+            self.device_clock.observe(device_ms, count, stamp_ns)
         stamp = stamp_ns/1e9
         with self.lock:
             self.arrivals.append((stamp, count))
@@ -30,12 +34,13 @@ class ReceiveTiming:
         span = live[-1][0]-live[0][0] if live else 0.
         duration = now-live[0][0]+live[0][1]/self.fs if live else 0.
         rate = sum(n for _,n in live)/duration if duration > 0 else None
-        return dict(received_rate_hz=rate, observation_seconds=span,
+        return dict(received_rate_hz=rate, received_points_per_second=rate, observation_seconds=span,
                     received_samples=total, processed_samples=processed,
                     queued_samples=max(0,total-processed),
                     backlog_seconds=max(0,total-processed)/self.fs,
                     last_arrival_age_seconds=now-entries[-1][0] if entries else None,
                     clock='ACP parser callback, independent of processing',
+                    device_timeline=self.device_clock.snapshot(int(now*1e9)),
                     physical_sample_clock_verified=False)
 
     def restart_observation(self):
@@ -45,11 +50,16 @@ class ReceiveTiming:
                 self.arrivals = deque([self.arrivals[-1]])
             self.bad_since = None
 
-    def check(self, snapshot, now=None):
+    def check(self, snapshot, now=None, *, allow_packet_loss=False):
         now = time.monotonic() if now is None else now
-        if snapshot['backlog_seconds'] > self.max_backlog:
+        if snapshot['backlog_seconds'] > self.max_backlog and not allow_packet_loss:
             raise RuntimeError(f"脑电处理积压约{snapshot['backlog_seconds']:.2f}秒，已停止以避免校准和动作使用滞后数据；不是采样率不匹配。")
         rate = snapshot['received_rate_hz']
+        if allow_packet_loss:
+            # ACP sample rate is checked against the device configuration. Loss
+            # and transport bursts change arrival rate, not the sampling contract.
+            self.bad_since = None
+            return
         bad = (rate is not None and snapshot['observation_seconds'] >= 1.5
                and not .8*self.fs <= rate <= 1.2*self.fs)
         if not bad:

@@ -129,6 +129,10 @@ class ImprovedSixClassDecoder:
         if self.hand_supervised != bool(payload.get('_hand_supervised_calibration',False)):
             raise ValueError('模型与有标签校准模式不一致。')
         self.hand_bias = None
+        self.calibration_disabled = bool(cfg.get('session_metadata',{}).get('online_calibration_disabled'))
+        if self.calibration_disabled:
+            self.audio_enabled = False
+            self.phase = 'disabled'
 
     def recover_stream(self, first_source_index, reason):
         with self.lock:
@@ -136,7 +140,7 @@ class ImprovedSixClassDecoder:
             self.stream_recovery_count += 1
             self.events.append(dict(kind='stream_interruption', reason=reason,
                 first_new_source_index=first_source_index, completed_trials_kept=self.completed,
-                repeated_task_id=None if self.alignment is not None else self.tasks[self.completed],
+                repeated_task_id=None if self.alignment is not None or self.calibration_disabled else self.tasks[self.completed],
                 abandoned_prompt_id=self.prompt_id, physical_event_time_verified=False))
             self.stream.reset(first_source_index)
             self.history = self.history[:, :0]
@@ -147,9 +151,11 @@ class ImprovedSixClassDecoder:
             self.started_index = self.prompt_id = self.prompt_created = None
             self.remaining = 0.
             self.warming_until = first_source_index+3000
-            self.phase = 'warming' if self.alignment is None else 'complete'
+            self.phase = 'disabled' if self.calibration_disabled else 'warming' if self.alignment is None else 'complete'
 
     def restore_calibration(self, saved):
+        if self.calibration_disabled:
+            raise ValueError('在线调试期间不从历史脑电重新拟合校准参数。')
         # The stream/filter state and EEG history remain fresh for this connection.
         with self.lock:
             if self.latest_index != -1 or self.alignment is not None:
@@ -196,6 +202,10 @@ class ImprovedSixClassDecoder:
 
     def snapshot_calibration(self):
         with self.lock:
+            if self.calibration_disabled:
+                return dict(required=False, ready=True, disabled=True, phase='disabled', completed=0,
+                            total=0, labels_used=False, awaiting_display=False, prompt_id=None,
+                            session_id=self.session_id, stream_recovery_count=self.stream_recovery_count)
             done = self.alignment is not None and (not self.hand_supervised or self.hand_bias is not None)
             label = self.tasks[min(self.completed, self.total-1)]
             return dict(required=True, completed=self.completed, total=self.total,
@@ -317,11 +327,12 @@ class ImprovedSixClassDecoder:
             return self.models[key](torch.from_numpy(values)).softmax(1).cpu().numpy().mean(0)
 
     def predict_windows(self, values):
-        if self.alignment is None:
+        if self.alignment is None and not self.calibration_disabled:
             raise RuntimeError('本次会话尚未完成校准。')
         p = self._infer('baseline', band_windows(values, [[4., 16.], [16., 40.]]))
         expert = band_windows(values, [[8., 13.], [13., 30.]])
-        aligned = np.einsum('cd,nbdt->nbct', self.alignment, expert, optimize=True).astype(np.float32)
+        aligned = (np.einsum('cd,nbdt->nbct', self.alignment, expert, optimize=True).astype(np.float32)
+                   if self.alignment is not None else expert)
         q = self._infer('expert', aligned)
         gated = int(p.argmax()) >= 4
         routed = p.copy()
@@ -332,28 +343,30 @@ class ImprovedSixClassDecoder:
             mass = float(q[4:6].sum())
             routed[:4] = 0
             routed[4:6] = q[4:6]/mass if mass > 0 else .5
-        elif self.hand_supervised:
+        elif self.hand_supervised and not self.calibration_disabled:
             if self.hand_bias is None:
                 raise RuntimeError('有标签动作校准尚未完成。')
             from .labelled_hand_calibration import route_hand
             routed = route_hand(p,self.hand_bias)
         self.last_details = dict(baseline_probabilities=p.tolist(), expert_probabilities=q.tolist(),
-            pair_routed=gated, hand_pair_routed=bool(self.hand_supervised and not gated),
+            pair_routed=gated, hand_pair_routed=bool(self.hand_supervised and not self.calibration_disabled and not gated),
+            online_calibration_disabled=self.calibration_disabled,
+            uncalibrated_identity_alignment=self.alignment is None,
             hand_bias=self.hand_bias.tolist() if self.hand_bias is not None else None,
             probability_semantics='hard_route_pair_conditional' if gated else
-                'labelled_hand_pair_conditional' if self.hand_supervised else 'baseline')
+                'labelled_hand_pair_conditional' if self.hand_supervised and not self.calibration_disabled else 'baseline')
         return routed
 
     def process(self, raw, indices):
         with self.lock:
-            if self.alignment is None and self.phase == 'imagery':
+            if self.alignment is None and not self.calibration_disabled and self.phase == 'imagery':
                 self.raw_calibration.append(raw, indices, self.started_index)
             values, retained = self.stream.process(raw, indices)
             self.latest_index = int(indices[-1])
             keep = max(2000, int((self.imagery_seconds+2)*self.stream.output_fs))
             self.history = np.concatenate((self.history, values[SCALP]), axis=1)[:, -keep:]
             self.indices = np.concatenate((self.indices, retained))[-keep:]
-            if self.alignment is None:
+            if self.alignment is None and not self.calibration_disabled:
                 self._calibrate_step()
                 return None
             now = self.latest_index/self.stream.fs

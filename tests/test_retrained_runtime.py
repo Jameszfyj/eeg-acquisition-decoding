@@ -60,7 +60,8 @@ class RetrainedRuntimeTests(unittest.TestCase):
             checked=controller.check(request)
             self.assertFalse(checked['connected'])
             self.assertEqual(checked['selection']['calibration_method'],CALIBRATION_METHOD)
-            self.assertTrue(checked['selection']['requires_calibration'])
+            self.assertFalse(checked['selection']['requires_calibration'])
+            self.assertTrue(checked['selection']['model_requires_calibration'])
             base=RetrainedStreamDecoder(selection['model'],cfg,selection['sha256'])
             wrapper=ImportedCalibrationDecoder(base,cfg,selection)
             rng=np.random.default_rng(44);raw=rng.normal(size=(120,32,4000)).astype(np.float32)
@@ -130,7 +131,7 @@ class RetrainedRuntimeTests(unittest.TestCase):
             self.assertAlmostEqual(float(result[1].sum()),1.,places=6)
             self.assertEqual(decoder.last_details['selected_head'],'ea_only')
             request['session_purpose']='calibration'
-            with self.assertRaisesRegex(ValueError,'已恢复20轮'):
+            with self.assertRaisesRegex(ValueError,'暂时禁用'):
                 controller.prepare(request)
             calibration.write_bytes(calibration.read_bytes()+b'changed')
             with self.assertRaisesRegex(ValueError,'发生变化'):

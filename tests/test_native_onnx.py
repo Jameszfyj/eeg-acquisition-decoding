@@ -71,8 +71,9 @@ class NativeONNXTests(unittest.TestCase):
         details=self.controller.model_details('P01',entry['model_id'])
         self.assertFalse(details['requires_prompted_calibration'])
         request.update(calibration_mode='reuse',calibration_source='old')
-        with self.assertRaisesRegex(ValueError,'已内置校准'):
-            self.controller.prepare(request)
+        prepared=self.controller.prepare(request)[0]
+        self.assertNotIn('calibration_reuse',prepared)
+        self.assertTrue(prepared['embedded_calibration_ready'])
 
     def test_bad_declared_bias_and_unknown_prepare_contract_are_rejected(self):
         manifest,model=fixture(True)
@@ -106,13 +107,14 @@ class NativeONNXTests(unittest.TestCase):
         self.assertIsNotNone(decoder.process(raw[:,8900:9200],np.arange(8900,9200)))
         self.assertEqual(decoder.last_window['model_start_index'],7000)
 
-    def test_unfitted_native_model_retains_twenty_round_prompted_calibration(self):
+    def test_unfitted_native_model_tests_directly_without_online_calibration_wrapper(self):
         entry,selection,cfg,decoder=self.add()
         request=dict(participant='P01',model_id=entry['model_id'],mode='acp',host='127.0.0.1',port=4097,
                      prompted=dict(enabled=True))
         prepared=self.controller.prepare(request)[0]
-        self.assertTrue(prepared['imported_calibration'])
-        self.assertEqual(prepared['calibration_trials'],120)
+        self.assertNotIn('imported_calibration',prepared)
+        self.assertFalse(prepared['requires_calibration'])
+        self.assertTrue(prepared['online_calibration_disabled'])
         wrapped=ImportedCalibrationDecoder(decoder,cfg,selection)
         wrapped.set_prompt_anchor(3500)
         self.assertFalse(decoder.prompted)

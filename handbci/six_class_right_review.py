@@ -129,11 +129,15 @@ class RightHandSixClassDecoder(ImprovedSixClassDecoder):
 
     def snapshot_calibration(self):
         result = super().snapshot_calibration()
-        result['ready'] = result['ready'] and self.right_state is not None
+        result['ready'] = result['ready'] and (self.right_state is not None or self.calibration_disabled)
         result['right_hand_review'] = True
         return result
 
     def predict_windows(self,values):
+        if self.calibration_disabled and self.right_state is None:
+            result = super().predict_windows(values)
+            self.last_details.update(right_hand_review=False, right_hand_review_skipped='online_calibration_disabled')
+            return result
         if self.right_state is None:
             raise RuntimeError('右手专项校准尚未完成。')
         routed = super().predict_windows(values)
@@ -173,6 +177,8 @@ class RightHandSixClassDecoder(ImprovedSixClassDecoder):
             path.write_text(json.dumps(metadata,ensure_ascii=False,indent=2),encoding='utf-8')
 
     def restore_calibration(self,saved):
+        if self.calibration_disabled:
+            raise ValueError('在线调试期间不从历史脑电重新拟合校准参数。')
         with self.lock:
             # Validate and recompute everything before the parent activates EA.
             if self.latest_index != -1 or self.alignment is not None:

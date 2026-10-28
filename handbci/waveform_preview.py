@@ -43,7 +43,11 @@ class WaveformPreview:
             return
         if self.last_index is not None and int(source_indices[0]) != self.last_index+1:
             self.zi = None
-            self.points.clear()
+        cuts = np.flatnonzero(np.diff(source_indices) != 1)+1
+        if len(cuts):
+            for part in np.split(np.arange(len(source_indices)), cuts):
+                self.append(raw[:,part], np.asarray(source_indices)[part])
+            return
         if self.zi is None:
             self.zi = signal.sosfilt_zi(self.sos)[:, None, :]*values[None, :, :1]
         filtered, self.zi = signal.sosfilt(self.sos, values, axis=1, zi=self.zi)
@@ -64,6 +68,7 @@ class WaveformPreview:
         return dict(channels=list(self.channels), available=list(self.available), unit=self.unit,
                     seconds=5, points=[list(row) for row in self.points],
                     display_sample_rate=self.fs/self.step if self.fs else None,
+                    time_axis='device_sample_time_seconds',
                     bandpass_hz=[1., self.high] if self.sos is not None else None,
                     notch_hz=50 if self.notch and self.sos is not None else None,
                     display_only=True)

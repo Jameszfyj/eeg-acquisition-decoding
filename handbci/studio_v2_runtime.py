@@ -111,7 +111,8 @@ class StudioV2Decoder:
     def __init__(self,path,cfg,expected_sha256=None):
         if expected_sha256 and file_sha256(path)!=expected_sha256:raise ValueError('v2模型校验失败。')
         self.model,self.contracts=load_source(path)
-        if self.model.calibration is None:
+        self.calibration_disabled=bool(cfg.get('session_metadata',{}).get('online_calibration_disabled'))
+        if self.model.calibration is None and not self.calibration_disabled:
             raise ValueError('v2源模型尚未专用校准；请在校准工具完成后导入calibrated.pt。')
         self.cfg=cfg;self.stream=StreamPreprocessor(cfg)
         self.prediction_stride_seconds=float(cfg['window']['stride_seconds'])
@@ -159,7 +160,9 @@ class StudioV2Decoder:
         self.last_window.update(anchor='prepare' if self.prompted else 'continuous',
             model_start_index=int(self.indices[first]),prepare_source_index=self.anchor,
             profile=PROFILE)
-        self.last_details=dict(calibration_method='studio_frozen_latent_readout_v2',
+        self.last_details=dict(calibration_method='studio_frozen_latent_readout_v2' if self.model.calibration is not None else None,
+            online_calibration_disabled=self.calibration_disabled,
+            selected_head='calibrated' if self.model.calibration is not None else 'original_source_head',
             preprocessing_profile=PROFILE,task_labels_used_for_live_prediction=False)
         return self.last_prediction,softmax(z[0])
 

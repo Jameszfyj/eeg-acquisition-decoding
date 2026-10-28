@@ -354,19 +354,25 @@ class StudioTests(unittest.TestCase):
                     c.abort('模拟测试结束');c.experiment.thread.join(8)
                 c.disconnect()
 
-    def test_packet_stall_and_subject_lease_abort(self):
+    def test_packet_stall_continues_but_subject_lease_still_aborts(self):
         for failure in ('stall','subject'):
             c=Controller(ROOT)
             with tempfile.TemporaryDirectory(dir=ROOT/'tests') as root:
                 c.sessions_root=Path(root);c.connect('synthetic',{'channels':8})
                 try:
                     time.sleep(.1);c.trigger_connect('software')
-                    c.start('FAULT',{**P,'task_seconds':3},require_subject=failure=='subject');e=c.experiment
-                    if failure=='stall':c.device.stop.set()
+                    c.start('FAULT',{**P,'task_seconds':.4 if failure=='stall' else 3},require_subject=failure=='subject');e=c.experiment
+                    if failure=='stall':
+                        time.sleep(.08)
+                        c.device.stop.set()
                     e.thread.join(8)
-                    self.assertFalse(c.last_summary['complete'])
-                    self.assertTrue(c.last_summary['error'])
-                finally:c.disconnect()
+                    self.assertFalse(e.thread.is_alive())
+                    self.assertEqual(c.last_summary['complete'],failure=='stall')
+                    self.assertEqual(bool(c.last_summary['error']),failure=='subject')
+                finally:
+                    if c.experiment:
+                        c.abort();e.thread.join(3)
+                    c.disconnect()
 
     def test_writer_failure_does_not_deadlock_marker_or_finalize(self):
         c=Controller(ROOT)
